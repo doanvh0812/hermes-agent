@@ -348,7 +348,10 @@ neither substitutes for backend authorization.
 
 | File | Install to | Purpose |
 |---|---|---|
-| `deploy/SOUL.snippet.md` | append to `$HERMES_HOME/SOUL.md` | Guardrail floor, present in every system prompt |
+| `deploy/SOUL.snippet.md` | assembled into the profile's `SOUL.md` | Guardrail floor, present in every system prompt |
+| `deploy/profile/config.yaml` | `$HERMES_HOME/profiles/zalo-bot/` | Locked-down profile: no terminal, no toolsets |
+| `deploy/profile/build-soul.sh` | run once | Assembles snippet + skill into the profile's `SOUL.md` |
+| `deploy/profile/hermes-gateway-zalo.service` | `~/.config/systemd/user/` | Gateway bound to that profile |
 | `deploy/skills/odoo/` | `$HERMES_HOME/skills/odoo/` | `odoo-chat-support` skill — full operating rules |
 | `deploy/odoo-mcp/field_policy.json` | `$HERMES_HOME/odoo-mcp/` | Field-level ACL enforced on every read path |
 | `deploy/odoo-mcp/instructions.txt` | `$HERMES_HOME/odoo-mcp/` | Server-level MCP instructions |
@@ -356,10 +359,112 @@ neither substitutes for backend authorization.
 | `deploy/logrotate.conf` | user cron | Log rotation |
 
 ```bash
-cat  deploy/SOUL.snippet.md >> "$HERMES_HOME/SOUL.md"     # append, never overwrite
 cp -r deploy/skills/odoo     "$HERMES_HOME/skills/"
 mkdir -p "$HERMES_HOME/odoo-mcp" && cp deploy/odoo-mcp/* "$HERMES_HOME/odoo-mcp/"
 ```
+
+`SOUL.snippet.md` goes into the **dedicated profile's** `SOUL.md`, not the
+root one — see "A dedicated profile is required" below for why appending it
+to the root profile does not restrain anything.
+
+### A dedicated profile is required, not optional
+
+**The adapter gate controls who reaches the agent. It does not control what
+the agent can do.** An agent with a terminal tool does not need the Odoo MCP
+server to write to Odoo — it can open a shell, write six lines of Python
+against XML-RPC, and create records directly. Every restriction configured on
+the MCP server (`ODOO_MCP_TOOLS_INCLUDE`, no `ENABLE_WRITES`, field ACL) is
+bypassed by that path, and so is every instruction in `SOUL.md`. Observed in
+production: asked to create records, the default-profile agent offered to do
+exactly that.
+
+So the agent serving chat users must be a **separate Hermes profile** with no
+terminal and no code execution.
+
+#### One gateway serves one profile
+
+There is no per-platform routing. A gateway process resolves its profile once
+at startup from `HERMES_HOME`, and `gateway.routing` in `config.yaml` is not
+a real key — writing it there is silently ignored (no error, no warning).
+
+`HERMES_HOME` selects the profile by path shape: when its immediate parent
+directory is named `profiles`, that directory *is* the profile. So
+`HERMES_HOME=~/.hermes/profiles/zalo-bot` runs the `zalo-bot` profile, while
+`HERMES_HOME=~/.hermes` runs the root/default one.
+
+Consequence: keeping a terminal-enabled agent on Telegram or the CLI while
+Zalo runs locked down requires **two gateway processes**, one per profile.
+
+#### Create the profile
+
+```bash
+hermes profile create zalo-bot
+```
+
+`$HERMES_HOME/profiles/zalo-bot/config.yaml` — write it minimal rather than
+copying the root config, which drags in terminal and every toolset:
+
+```yaml
+model: max
+terminal:
+  enabled: false        # the single most important line in this file
+toolsets:
+  enabled: false
+plugins:
+  enabled: []
+mcp_servers:
+  odoo:
+    command: uvx
+    args: [odoo-mcp]
+    env:
+      # ... same block as the MCP section below ...
+```
+
+#### The profile's SOUL.md carries the full rules
+
+A profile reads **its own** `SOUL.md`, not the root one. Concatenate the
+guardrail snippet and the skill body into it, so the rules are present in
+every system prompt rather than waiting on a context match:
+
+```bash
+P="$HERMES_HOME/profiles/zalo-bot"
+{
+  cat deploy/SOUL.snippet.md
+  echo; echo "---"; echo
+  sed '1,/^---$/d; 1,/^---$/d' deploy/skills/odoo/odoo-chat-support/SKILL.md
+} > "$P/SOUL.md"
+```
+
+(The two `sed` ranges strip the skill's YAML frontmatter, which has no
+meaning inside `SOUL.md`.)
+
+#### Run the gateway on that profile
+
+```ini
+# ~/.config/systemd/user/hermes-gateway-zalo.service
+[Service]
+Environment="HERMES_HOME=%h/.hermes/profiles/zalo-bot"
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run
+Restart=always
+```
+
+Disable Zalo (`ZALO_ENABLED`) in the root profile's env so the two gateways
+do not both try to own the bridge — the adapter's scoped lock will reject the
+second one, but it is cleaner not to race for it.
+
+#### Verify the profile is actually in effect
+
+Configuration that is ignored fails silently here, so check the running
+process rather than the files:
+
+```bash
+PID=$(python3 -c "import json;print(json.load(open('$HERMES_HOME/gateway_state.json'))['pid'])")
+tr '\0' '\n' < /proc/$PID/environ | grep HERMES_HOME
+# must print .../profiles/zalo-bot — if it prints the root, the profile is NOT active
+```
+
+Then confirm behaviour from Zalo: ask the bot to create a record. It must
+refuse, and it must have no terminal to fall back on.
 
 ### Why the rules live in two places
 

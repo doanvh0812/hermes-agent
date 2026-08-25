@@ -1,0 +1,25 @@
+# Gateway process bound to the zalo-bot profile.
+#
+# A gateway serves exactly one profile, resolved from HERMES_HOME at startup.
+# HERMES_HOME whose immediate parent is named "profiles" selects that profile;
+# pointing it at the hermes root runs the default profile instead.
+#
+# Install to: ~/.config/systemd/user/hermes-gateway-zalo.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hermes-gateway-zalo
+
+[Unit]
+Description=Hermes Gateway (zalo-bot profile, read-only Odoo support)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="HERMES_HOME=%h/.hermes/profiles/zalo-bot"
+Environment="PATH=%h/.hermes/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,44 @@
+# Profile config for the Zalo support bot.
+#
+# Written minimal on purpose. Copying the root config.yaml drags in the
+# terminal backend and every toolset — which is exactly what this profile
+# exists to remove. An agent with a terminal can reach Odoo over XML-RPC
+# directly, bypassing every MCP-level restriction below.
+#
+# Install to: $HERMES_HOME/profiles/zalo-bot/config.yaml
+
+model: max
+
+terminal:
+  enabled: false        # the single most important line in this file
+
+toolsets:
+  enabled: false
+
+plugins:
+  enabled: []
+
+mcp_servers:
+  odoo:
+    command: uvx
+    args: [odoo-mcp]
+    env:
+      ODOO_URL: "https://odoo.example.com"
+      ODOO_DB: "dbname"
+      ODOO_USERNAME: "bot_readonly"
+      ODOO_PASSWORD: "${ODOO_API_KEY}"
+      ODOO_TRANSPORT: "xmlrpc"        # json2 for Odoo 19+
+
+      # 7 of 41 tools. Allowlist, so tools added upstream stay off.
+      ODOO_MCP_TOOLS_INCLUDE: "search_records,read_record,aggregate_records,get_model_fields,build_domain,receivable_payable_aging,accounting_health_summary"
+      ODOO_MCP_ALLOW_UNKNOWN_METHODS: "0"
+      # ODOO_MCP_ENABLE_WRITES intentionally unset.
+
+      ODOO_MCP_FIELD_POLICY_FILE: "/home/USER/.hermes/odoo-mcp/field_policy.json"
+      ODOO_MCP_INSTRUCTIONS_FILE: "/home/USER/.hermes/odoo-mcp/instructions.txt"
+
+      ODOO_MCP_RATE_LIMIT_MODE: "block"
+      ODOO_MCP_RATE_LIMIT_WINDOW: "60"
+      ODOO_MCP_RATE_LIMIT_MAX_CALLS: "30"
+
+      ODOO_LOCALE: "vi_VN"
