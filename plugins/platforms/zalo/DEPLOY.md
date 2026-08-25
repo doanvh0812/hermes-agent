@@ -9,6 +9,99 @@ dedup, admin approval flow, and an audit trail.
 
 ---
 
+## Deploying on a fresh machine — ordered checklist
+
+Read this section first. The rest of the document is reference material
+organised by topic, not by the order you need it in.
+
+The single most important step is **step 5**: without a dedicated profile the
+bot can write to Odoo regardless of everything else configured here. Do not
+open the bot to users before step 9 passes.
+
+```
+ 1. Prerequisites          node >= 18, python >= 3.11, uv (for uvx)
+ 2. Copy the plugin        into $HERMES_HOME/hermes-agent/plugins/platforms/
+ 3. QR login               node bridge/index.js --qr-login
+ 4. Environment            .env: ZALO_ENABLED, ZALO_BRIDGE_TOKEN, ZALO_OWNER_ID
+ 5. Dedicated profile      ← the actual write barrier; see §"A dedicated profile"
+ 6. Odoo MCP               credentials + field ACL + instructions
+ 7. Access list            allowlist.json, admins, mode
+ 8. Ops                    health cron + logrotate
+ 9. Verify                 profile in effect, writes refused, no replay
+```
+
+### 1. Prerequisites
+
+| Need | Why |
+|---|---|
+| Node.js >= 18 | the zca-js bridge |
+| Python >= 3.11 | adapter uses `OrderedDict` typing and `datetime.timezone` |
+| `uv` on PATH | the MCP server runs as `uvx odoo-mcp` |
+| A **secondary** Zalo account with its own SIM | zca-js is unofficial; the account can be locked |
+
+`systemctl --user` needs lingering enabled or the gateway dies at logout:
+
+```bash
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" --property=Linger   # must print Linger=yes
+```
+
+### 2. Copy the plugin
+
+```bash
+git clone -b doanvh0812/feat-zalo-chatbot-spec git@github.com:doanvh0812/hermes-agent.git /tmp/hz
+cp -r /tmp/hz/plugins/platforms/zalo "$HERMES_HOME/hermes-agent/plugins/platforms/"
+cd "$HERMES_HOME/hermes-agent/plugins/platforms/zalo/bridge" && npm install --omit=dev
+```
+
+> **`hermes update` can overwrite this directory.** It lives inside the
+> Hermes checkout and is not gitignored there. After every update, re-copy
+> the plugin and re-run the verification in step 9. Keep the clone around.
+
+### 3–8
+
+Steps 3, 4, 6, 7, 8 are the sections below (QR login, Environment, MCP
+configuration, allowlist, Monitoring). Step 5 is
+**"A dedicated profile is required, not optional"** — do not skip it.
+
+### 9. Verification gate
+
+Run all four before letting anyone else message the bot.
+
+```bash
+# a. the profile is actually in effect (config here fails silently)
+PID=$(python3 -c "import json;print(json.load(open('$HERMES_HOME/gateway_state.json'))['pid'])")
+tr '\0' '\n' < /proc/$PID/environ | grep HERMES_HOME
+#    -> must end in /profiles/zalo-bot
+
+# b. the bridge is reachable and the token matches
+curl -s 127.0.0.1:8647/health
+curl -s -H "X-Bridge-Token: $ZALO_BRIDGE_TOKEN" '127.0.0.1:8647/events?since=0'
+#    -> must NOT be {"error":"bad bridge token"}
+
+# c. no replay across a restart
+systemctl --user restart hermes-gateway-zalo
+tail -5 "$HERMES_HOME/zalo/audit.jsonl"
+#    -> no old messages re-answered; repeats appear as verdict "dup"
+```
+
+d. From Zalo, ask the bot to **create** something ("tạo 5 liên hệ test"). It
+must refuse. If it offers to do it, or starts describing how, step 5 is not
+in effect — stop and fix that before continuing.
+
+### State that must survive a redeploy
+
+Under `$HERMES_HOME/zalo/`:
+
+| File | Losing it means |
+|---|---|
+| `session.json` | re-scan the QR (and Zalo dislikes frequent re-logins) |
+| `allowlist.json` | everyone loses access; admins must be re-added |
+| `seen.json` | one replay of the bridge ring buffer on next start |
+| `audit.jsonl` | the access record is gone |
+
+Back these up before any migration. `.health-state` is disposable.
+
 ## Contents
 
 | Path | Role |
@@ -579,3 +672,95 @@ is the compensating control when that is not available, not an equivalent.
 **nowhere** — not by mcp-odoo, not by `audit.jsonl`, which captures the
 question and the answer but not the queries between them. If you need "what
 did the bot actually read", add a tool-call hook at the agent layer.
+
+---
+
+## Known gaps and follow-up work
+
+Ordered by how much they matter. Items 1–3 are open holes, not polish.
+
+### 1. One shared Odoo account means no per-user data isolation
+
+Every approved user sees the same data, because every query runs as the same
+Odoo credential. A warehouse employee and an accountant get identical
+answers to "how much does customer X owe".
+
+Acceptable for an internal staff bot where everyone may see everything.
+**Not** acceptable for external customers — customer A could ask about
+customer B and get a real answer.
+
+Closing it needs a `zalo_user_id -> res.partner` binding, with `partner_id`
+resolved **server-side** from the sender and never accepted as a model-supplied
+argument. If the model can pass `partner_id`, any prompt-level guardrail is
+bypassable with a well-phrased question.
+
+### 2. Read queries are audited nowhere
+
+`audit.jsonl` records the question and the answer, not the queries between
+them. `ODOO_MCP_AUDIT_LOG` covers only the write path. So "which records did
+the bot actually read on 25/08" cannot be answered today.
+
+For a bot reading financial data this is usually a compliance requirement.
+It needs a tool-call hook at the agent layer, logging
+`(zalo_user, tool, arguments, row_count)`.
+
+### 3. Running as an Odoo admin account
+
+If the credential is an admin, `field_policy.json` is the only thing keeping
+HR and payroll out of the agent's context — verified working, but it is a
+denylist of *known* models. Install a new Odoo module holding sensitive data
+and it is exposed until someone adds it to the policy.
+
+A dedicated read-only Odoo user with record rules does not have that
+property. See "Running against a high-privilege Odoo account".
+
+### 4. Conversation history does not survive a restart
+
+The gateway logs `'zalo' is not a valid Platform` and drops stored session
+entries, because `zalo` is a plugin platform outside the core `Platform`
+enum. Each restart starts every conversation cold. Harmless for one-shot
+lookups, visible to users in a multi-turn exchange.
+
+### 5. Group support is untested
+
+Mention-gating is implemented and unit-tested, but has not run against a real
+Zalo group — the deployment it was built on had none. Before enabling groups:
+approve one with `/duyet-nhom`, confirm untagged messages log as `ambient`,
+and confirm a tagged message is answered.
+
+`ZALO_MENTION_ALL_COUNTS` decides whether `@all` counts as addressing the
+bot. Default off; turning it on in a busy group makes the bot answer every
+broadcast.
+
+### 6. `zalo_allow.py` cannot promote the first admin
+
+The CLI edits users and groups. Bootstrapping the very first admin still
+means editing `allowlist.json` by hand or setting `ZALO_OWNER_ID`.
+`add_admin()` exists in the store; the CLI just does not expose a
+"make this person an admin from scratch" flow.
+
+### 7. Attachments are not persisted
+
+Files sent to the bot land in Hermes' 24-hour document cache and are
+discarded after the turn. If invoices or documents need to be referenced
+later, write a hook that stores them (MinIO or similar) with sender,
+session, and timestamp metadata at receive time.
+
+### 8. Rate limiting is per tool, not per user
+
+`ODOO_MCP_RATE_LIMIT_*` budgets are per `instance:tool`. One user asking
+rapid questions consumes the budget for everyone, turning a protection into
+a denial-of-service vector. A per-`zalo_user_id` limit belongs in the
+adapter, with the MCP limit kept as a lower backstop.
+
+### 9. Alerts go to syslog only
+
+`zalo-health.sh` calls `logger`. Nobody reads syslog. Point it at something
+that reaches a person — ntfy, a Telegram bot, email — or the silent failure
+modes stay silent.
+
+### 10. Two gateways, two failure surfaces
+
+Running Zalo on its own profile means two gateway processes. Monitor both.
+`systemctl --user status hermes-gateway hermes-gateway-zalo` is the minimum;
+the health script only covers the bridge.
