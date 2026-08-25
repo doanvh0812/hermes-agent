@@ -141,6 +141,28 @@ _MD_HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_BULLET_RE = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)
 
 
+
+_TECHNICAL_ERROR_PATTERNS = [
+    r"Rate limited after \d+ retries",
+    r"HTTP 429",
+    r"RESOURCE_EXHAUSTED",
+    r"RateLimitError",
+    r"AuthenticationError",
+    r"InternalServerError",
+    r"Traceback \(most recent call last\)",
+    r"antigravity/",
+    r"openai\.",
+    r"anthropic\.",
+    r"google\.api_core",
+]
+
+def sanitize_technical_error(text: str) -> str:
+    """Sanitize internal engine/provider error dumps before sending to Zalo."""
+    for pattern in _TECHNICAL_ERROR_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return "⚠️ Hệ thống AI đang tạm thời quá tải hoặc bận xử lý. Anh/chị vui lòng thử lại sau ít giây nhé."
+    return text
+
 def strip_markdown_preserving_urls(text: str) -> str:
     """Strip Markdown Zalo can't render, keeping bare URLs tappable."""
     if not text:
@@ -554,6 +576,8 @@ class ZaloAdapter(BasePlatformAdapter):
             hermes_home = Path.home() / ".hermes"
         self._session_path = hermes_home / "zalo" / "session.json"
         self._audit_path = self._session_path.parent / "audit.jsonl"
+        self._dedup_path = self._session_path.parent / "seen.json"
+        self._load_dedup_state()
 
         self._allowlist = _load_allowlist_store()(
             self._session_path.parent / "allowlist.json"
@@ -932,8 +956,54 @@ class ZaloAdapter(BasePlatformAdapter):
 
         return True
 
+    def _load_dedup_state(self) -> None:
+        """Restore the seen-set and event cursor from disk.
+
+        In-memory state alone does not survive a gateway restart, and the
+        bridge deliberately outlives the gateway — so on restart the adapter
+        re-reads the bridge's ring buffer from cursor 0 with an empty
+        seen-set and answers every buffered message again. Observed in
+        production: three identical messages replayed across three restarts,
+        none flagged as duplicates.
+        """
+        try:
+            data = json.loads(self._dedup_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        seen = data.get("seen")
+        if isinstance(seen, list):
+            for mid in seen[-SEEN_MSG_CAP:]:
+                self._seen_msgs[str(mid)] = None
+        try:
+            self._event_cursor = max(0, int(data.get("cursor", 0)))
+        except (TypeError, ValueError):
+            self._event_cursor = 0
+        if self._seen_msgs:
+            logger.info(
+                "Zalo: restored %d seen message ids, cursor=%d",
+                len(self._seen_msgs), self._event_cursor,
+            )
+
+    def _save_dedup_state(self) -> None:
+        """Persist the seen-set atomically. Never raises."""
+        try:
+            tmp = self._dedup_path.with_suffix(".json.tmp")
+            self._dedup_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps({
+                    "cursor": self._event_cursor,
+                    "seen": list(self._seen_msgs),
+                }),
+                encoding="utf-8",
+            )
+            tmp.replace(self._dedup_path)
+        except OSError:
+            pass
+
     def _is_duplicate(self, msg_id: str) -> bool:
-        """LRU seen-set keyed by Zalo message id.
+        """LRU seen-set keyed by Zalo message id, persisted across restarts.
 
         Required because ``_poll_loop`` only advances ``_event_cursor``
         after a whole batch is handled, and a gateway restart against a
@@ -947,6 +1017,7 @@ class ZaloAdapter(BasePlatformAdapter):
         self._seen_msgs[msg_id] = None
         if len(self._seen_msgs) > SEEN_MSG_CAP:
             self._seen_msgs.popitem(last=False)
+        self._save_dedup_state()
         return False
 
     async def _notify_admins_pending(self, uid: str, text: str) -> None:
@@ -1115,7 +1186,9 @@ class ZaloAdapter(BasePlatformAdapter):
                         await self._handle_bridge_event(evt)
                     except Exception:
                         logger.exception("Zalo: failed handling bridge event")
-                self._event_cursor = max(self._event_cursor, cursor)
+                if cursor > self._event_cursor:
+                    self._event_cursor = cursor
+                    self._save_dedup_state()
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 raise
@@ -1224,7 +1297,8 @@ class ZaloAdapter(BasePlatformAdapter):
         if not client:
             return SendResult(success=False, error="Zalo adapter not connected")
         thread_id, thread_type = parse_chat_id(chat_id)
-        chunks = split_for_zalo(strip_markdown_preserving_urls(content))
+        sanitized_content = sanitize_technical_error(content)
+        chunks = split_for_zalo(strip_markdown_preserving_urls(sanitized_content))
         last_msg_id: Optional[str] = None
         try:
             for chunk in chunks:
