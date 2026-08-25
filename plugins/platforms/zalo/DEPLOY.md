@@ -15,6 +15,7 @@ dedup, admin approval flow, and an audit trail.
 |---|---|
 | `adapter.py` | Gateway adapter: access gate, dedup, audit, admin commands |
 | `allowlist_store.py` | Hot-reloading `allowlist.json` reader/writer |
+| `zalo_allow.py` | CLI: pick friends/groups by name, no uid needed |
 | `bridge/index.js` | Node bridge to zca-js; loopback HTTP on 127.0.0.1:8647 |
 | `plugin.yaml` | Plugin manifest |
 
@@ -118,6 +119,42 @@ commands exist. Denials are recorded as `cmd_denied` in the audit log.
 /duyet-nhom       approve the current group (run inside it)
 /ai               show who currently has access
 ```
+
+## 4b. Managing access from the terminal
+
+`zalo_allow.py` lists friends and groups **by name and phone number** and
+writes the allowlist for you — no uid archaeology, no log reading. The
+bridge must be running; the gateway need not be.
+
+```bash
+python3 zalo_allow.py           # interactive picker
+python3 zalo_allow.py --list    # who currently has access
+python3 zalo_allow.py --json    # machine-readable
+```
+
+```
+--- NHÓM ---
+    1. [ ] Kho Hà Nội                 12 thành viên    chưa duyệt
+--- BẠN BÈ ---
+    2. [★] Đoàn                       —                admin
+    3. [◦] Nguyễn Văn A               090xxx1234       bạn bè
+
+Chọn> 1        approve the group
+Chọn> !3       deny-list a user (beats friendship)
+Chọn> +3       make admin      ·  -+3 revoke admin
+Chọn> -1       revoke          ·  r   re-fetch directory
+```
+
+The directory is fetched once per run and cached: Zalo throttles these
+upstream calls and the bridge reports a throttle as HTTP 500, so re-listing
+after every edit would trip it. Only local markers are recomputed; press
+`r` after befriending someone new.
+
+Admins live in a **flat** `admins` list, unlike `users`/`groups` which nest
+a bucket under a section. `add()`/`remove()` raise on `"admins"` for that
+reason — use `add_admin()`/`remove_admin()`. `remove_admin()` also refuses
+to remove the last admin, since an empty list falls back to
+`ZALO_OWNER_ID` and, if that is unset, locks everyone out of approvals.
 
 ## 5. Bootstrap the first admin
 

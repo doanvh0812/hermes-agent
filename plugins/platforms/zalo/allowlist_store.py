@@ -165,9 +165,59 @@ class AllowlistStore:
     # Mutation (atomic writes)
     # ------------------------------------------------------------------
 
+    def add_admin(self, entry_id: str, name: str = "") -> bool:
+        """Add an admin. Returns True when the file changed.
+
+        ``admins`` is a flat list, unlike ``users``/``groups`` which nest a
+        bucket under a section — passing it to :meth:`add` would rewrite it
+        as ``{"<bucket>": [...]}`` and silently destroy every admin entry.
+        """
+        entry_id = str(entry_id or "")
+        if not entry_id:
+            return False
+        self._maybe_reload(force=True)
+        data = dict(self._data)
+        admins = list(data.get("admins") or [])
+        for existing in admins:
+            if _entry_id(existing) == entry_id:
+                return False
+        admins.append({"id": entry_id, "name": name or entry_id})
+        data["admins"] = admins
+        self._write(data)
+        return True
+
+    def remove_admin(self, entry_id: str) -> bool:
+        """Remove an admin. Refuses to remove the last one.
+
+        An empty ``admins`` list falls back to ``ZALO_OWNER_ID``; if that is
+        unset too, nobody can approve anyone and the only way back is
+        hand-editing the file.
+        """
+        entry_id = str(entry_id or "")
+        if not entry_id:
+            return False
+        self._maybe_reload(force=True)
+        data = dict(self._data)
+        admins = list(data.get("admins") or [])
+        kept = [e for e in admins if _entry_id(e) != entry_id]
+        if len(kept) == len(admins):
+            return False
+        if not kept:
+            raise ValueError(
+                "refusing to remove the last admin — add another one first"
+            )
+        data["admins"] = kept
+        self._write(data)
+        return True
+
     def add(self, section: str, bucket: str, entry_id: str,
             name: str = "") -> bool:
-        """Add one entry. Returns True when the file changed."""
+        """Add one entry to a section/bucket list (users, groups).
+
+        Not for ``admins`` — that is a flat list; use :meth:`add_admin`.
+        """
+        if section == "admins":
+            raise ValueError("use add_admin() — 'admins' is a flat list")
         entry_id = str(entry_id or "")
         if not entry_id:
             return False
@@ -185,6 +235,8 @@ class AllowlistStore:
         return True
 
     def remove(self, section: str, bucket: str, entry_id: str) -> bool:
+        if section == "admins":
+            raise ValueError("use remove_admin() — 'admins' is a flat list")
         entry_id = str(entry_id or "")
         if not entry_id:
             return False

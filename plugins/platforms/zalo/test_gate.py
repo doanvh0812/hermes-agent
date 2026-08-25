@@ -87,6 +87,39 @@ s.remove("users", "allow", "u_new")
 check("remove persists", AllowlistStore(tmp).user_allowed("u_new"), False)
 check("file mode 0600", oct(tmp.stat().st_mode & 0o777), "0o600")
 
+# admins is a FLAT list — add()/remove() must refuse it rather than
+# rewriting it as {"<bucket>": [...]} and wiping every admin.
+print("\n=== admins (flat list) ===")
+try:
+    s.add("admins", "allow", "hacker", "x")
+    check("add() refuses admins", "no exception", "ValueError")
+except ValueError:
+    check("add() refuses admins", True, True)
+try:
+    s.remove("admins", "allow", "admin1")
+    check("remove() refuses admins", "no exception", "ValueError")
+except ValueError:
+    check("remove() refuses admins", True, True)
+check("admins intact after refusal", s.admin_ids(), ["admin1", "admin2"])
+
+check("add_admin works", s.add_admin("admin3", "Anh Ba"), True)
+check("add_admin persists", AllowlistStore(tmp).is_admin("admin3"), True)
+check("add_admin idempotent", s.add_admin("admin3", "x"), False)
+check("add_admin keeps others", s.admin_ids(), ["admin1", "admin2", "admin3"])
+check("remove_admin works", s.remove_admin("admin3"), True)
+check("remove_admin persists", AllowlistStore(tmp).is_admin("admin3"), False)
+
+# last-admin guard: an empty admins list means nobody can approve anyone
+solo = Path(tempfile.mkdtemp()) / "a.json"
+solo.write_text(json.dumps({"admins": [{"id": "only"}]}), encoding="utf-8")
+s5 = AllowlistStore(solo)
+try:
+    s5.remove_admin("only")
+    check("refuses removing last admin", "no exception", "ValueError")
+except ValueError:
+    check("refuses removing last admin", True, True)
+check("last admin still there", s5.admin_ids(), ["only"])
+
 # corrupt file keeps last good copy (fail-closed)
 s3 = AllowlistStore(tmp)
 _ = s3.mode                      # prime cache
