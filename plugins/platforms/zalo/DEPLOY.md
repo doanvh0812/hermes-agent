@@ -435,6 +435,39 @@ Do **not** set `ODOO_MCP_ENABLE_WRITES`.
 Use **stdio** (as above). The HTTP transport ships no authentication —
 `MCP_ALLOW_REMOTE_HTTP=1` exposes an unauthenticated Odoo reader.
 
+### Running against a high-privilege Odoo account
+
+If the credential is an admin (or any account whose Odoo record rules do not
+constrain it), Odoo's own model ACLs and record rules stop being a boundary
+for this bot. Blocking writes is not enough — the exposure is on the **read**
+side: `search_records` against an admin credential reaches `hr.contract`
+(salaries), `hr.employee` (national ID, bank account), `res.users`, and every
+company in the database.
+
+`field_policy.json` is what closes that, using `allow` whitelists rather than
+`deny` lists. An `allow` entry is exclusive: every field not listed is
+stripped, so a query against a whitelisted-to-`["name"]` model still returns
+rows but no usable content. Applied to HR/payroll, users and API keys, access
+rules and config parameters, mail servers, and bank accounts.
+
+This is enforced inside the MCP server process, on every read path
+(`search_records`, `read_record`, aggregates, knowledge index, resources).
+Aggregating on a denied field is rejected outright, so values cannot be
+inferred from group totals. A malformed policy aborts the server at startup
+rather than running unprotected.
+
+Two limits worth stating plainly:
+
+- It protects the **agent surface**, not Odoo. The credential itself can
+  still do everything it could before — anything else holding that key is
+  unaffected.
+- `search_employee` and `search_holidays` return curated projections outside
+  the redaction path. They are excluded from `ODOO_MCP_TOOLS_INCLUDE` here
+  for that reason; if you add them back, re-check what they return.
+
+A dedicated read-only Odoo user remains the stronger arrangement. Field ACL
+is the compensating control when that is not available, not an equivalent.
+
 ### Audit gap
 
 `ODOO_MCP_AUDIT_LOG` records only the write path. Read queries are logged

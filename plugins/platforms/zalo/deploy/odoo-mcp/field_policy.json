@@ -1,45 +1,69 @@
 {
+  "_comment": [
+    "The Odoo credential is an admin account, so Odoo's own record rules and",
+    "model ACLs do not restrict it. This file is therefore the layer that",
+    "keeps HR, payroll, and credential data out of the agent's context.",
+    "",
+    "Models that must never be readable use an 'allow' whitelist reduced to a",
+    "harmless field: an exclusive whitelist means everything else is stripped,",
+    "so a query still returns rows but carries no usable content.",
+    "",
+    "A malformed policy aborts the server at startup (fail closed)."
+  ],
+
   "field_acl": {
     "default": {
-      "res.partner": {
+      "*": {
         "deny": [
-          "vat", "company_registry",
-          "bank_ids", "credit_limit",
-          "comment", "message_ids", "message_follower_ids",
-          "user_id", "team_id",
-          "signup_token", "signup_type", "signup_expiration"
+          "message_ids",
+          "message_follower_ids",
+          "message_attachment_count",
+          "activity_ids",
+          "website_message_ids"
         ]
       },
-      "res.users": {
-        "deny": ["password", "new_password", "api_key_ids", "oauth_access_token",
-                 "totp_secret", "login_date", "signature"]
+
+      "hr.employee": { "allow": ["name", "work_email", "department_id", "job_title"] },
+      "hr.employee.public": { "allow": ["name", "department_id", "job_title"] },
+      "hr.contract": { "allow": ["name"] },
+      "hr.payslip": { "allow": ["name"] },
+      "hr.payslip.line": { "allow": ["name"] },
+      "hr.salary.rule": { "allow": ["name"] },
+      "hr.leave": { "allow": ["name"] },
+      "hr.applicant": { "allow": ["name"] },
+      "hr.expense": { "allow": ["name"] },
+
+      "res.users": { "allow": ["name", "login"] },
+      "res.users.apikeys": { "allow": ["name"] },
+      "res.groups": { "allow": ["name"] },
+      "ir.model.access": { "allow": ["name"] },
+      "ir.rule": { "allow": ["name"] },
+      "ir.config_parameter": { "allow": ["key"] },
+      "ir.cron": { "allow": ["name"] },
+      "ir.attachment": { "allow": ["name", "mimetype", "file_size"] },
+      "ir.logging": { "allow": ["name"] },
+      "ir.mail_server": { "allow": ["name"] },
+      "fetchmail.server": { "allow": ["name"] },
+      "auth.totp.device": { "allow": ["name"] },
+
+      "res.partner.bank": { "allow": ["bank_id"] },
+      "account.payment.method": { "allow": ["name"] },
+
+      "res.partner": {
+        "deny": [
+          "vat", "company_registry", "bank_ids", "credit_limit",
+          "comment", "user_id", "signup_token", "signup_type",
+          "signup_expiration", "password", "barcode"
+        ]
       },
-      "hr.employee": {
-        "deny": ["ssnid", "sinid", "identification_id", "passport_id",
-                 "bank_account_id", "km_home_work", "private_email",
-                 "private_phone", "private_street", "private_city",
-                 "emergency_contact", "emergency_phone", "birthday",
-                 "children", "marital", "spouse_complete_name",
-                 "certificate", "study_field", "study_school"]
-      },
-      "hr.contract": {
-        "deny": ["wage", "hourly_wage", "notes"]
-      },
-      "account.move": {
-        "deny": ["narration", "message_ids", "message_follower_ids"]
-      },
-      "product.template": {
-        "deny": ["standard_price", "description_purchase", "message_ids"]
-      },
-      "product.product": {
-        "deny": ["standard_price", "description_purchase", "message_ids"]
-      },
-      "sale.order": {
-        "deny": ["margin", "margin_percent", "note", "message_ids"]
-      },
-      "purchase.order": {
-        "deny": ["notes", "message_ids"]
-      }
+      "account.move": { "deny": ["narration"] },
+      "account.move.line": { "deny": ["internal_note"] },
+      "product.template": { "deny": ["standard_price", "description_purchase"] },
+      "product.product": { "deny": ["standard_price", "description_purchase"] },
+      "sale.order": { "deny": ["margin", "margin_percent", "note"] },
+      "sale.order.line": { "deny": ["margin", "margin_percent", "purchase_price"] },
+      "purchase.order": { "deny": ["notes"] },
+      "stock.picking": { "deny": ["note"] }
     }
   }
 }
