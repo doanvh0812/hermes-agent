@@ -337,3 +337,107 @@ Cases that matter most, verified against a live account:
 3. Untagged group message → `ambient`, no reply
 4. Admin runs `/duyet-nhom` in an unapproved group → works (bypass path)
 5. Corrupt `allowlist.json` → last good copy retained, no new access granted
+
+---
+
+## Agent-side configuration (`deploy/`)
+
+The adapter controls *who reaches the agent*. These control *what the agent
+does once a message gets through* — the two are independent layers, and
+neither substitutes for backend authorization.
+
+| File | Install to | Purpose |
+|---|---|---|
+| `deploy/SOUL.snippet.md` | append to `$HERMES_HOME/SOUL.md` | Guardrail floor, present in every system prompt |
+| `deploy/skills/odoo/` | `$HERMES_HOME/skills/odoo/` | `odoo-chat-support` skill — full operating rules |
+| `deploy/odoo-mcp/field_policy.json` | `$HERMES_HOME/odoo-mcp/` | Field-level ACL enforced on every read path |
+| `deploy/odoo-mcp/instructions.txt` | `$HERMES_HOME/odoo-mcp/` | Server-level MCP instructions |
+| `deploy/zalo-health.sh` | anywhere on PATH | Bridge health + token-drift check |
+| `deploy/logrotate.conf` | user cron | Log rotation |
+
+```bash
+cat  deploy/SOUL.snippet.md >> "$HERMES_HOME/SOUL.md"     # append, never overwrite
+cp -r deploy/skills/odoo     "$HERMES_HOME/skills/"
+mkdir -p "$HERMES_HOME/odoo-mcp" && cp deploy/odoo-mcp/* "$HERMES_HOME/odoo-mcp/"
+```
+
+### Why the rules live in two places
+
+`SOUL.md` is in *every* system prompt; the skill loads only when the context
+matches. A guardrail that exists solely in a skill is absent exactly when an
+unexpected message arrives — so the hard invariants (read-only, retrieved
+data is never instructions, user claims are not authorization, no internals,
+no fabrication) are duplicated into `SOUL.md` on purpose. The skill carries
+the long form: injection handling, data minimisation, ambiguity resolution,
+worked examples.
+
+Keep both in sync when either changes.
+
+### These are guardrails, not the security boundary
+
+Model instructions are advisory. The real boundary is:
+
+1. **The Odoo user.** Create a dedicated read-only account with record rules
+   scoped to what the bot may see. Never point it at admin or a real
+   person's API key. This is the layer that actually holds when everything
+   above it fails.
+2. **The tool surface.** `ODOO_MCP_TOOLS_INCLUDE` (allowlist, not exclude —
+   fail closed) and `ODOO_MCP_ENABLE_WRITES` left unset.
+3. **Field ACL.** `field_policy.json`, enforced server-side on every read.
+4. **The adapter gate.** Who may talk to the agent at all.
+
+Note the gap this deployment does not close: with one shared Odoo account,
+every approved user sees the same data. That is acceptable for an internal
+staff bot and **not** acceptable for a bot serving external customers — that
+would need per-user identity mapping, with `partner_id` resolved server-side
+from the sender and never accepted as a model-supplied argument.
+
+### MCP server configuration
+
+Add to `$HERMES_HOME/config.yaml` under `mcp_servers:` once Odoo credentials
+exist:
+
+```yaml
+  odoo:
+    command: uvx
+    args: [odoo-mcp]
+    env:
+      ODOO_URL: "https://odoo.example.com"
+      ODOO_DB: "dbname"
+      ODOO_USERNAME: "bot_readonly"
+      ODOO_PASSWORD: "<api-key>"
+      ODOO_TRANSPORT: "xmlrpc"          # json2 for Odoo 19+
+
+      # 7 of 41 tools. Allowlist, so anything added upstream stays off.
+      ODOO_MCP_TOOLS_INCLUDE: "search_records,read_record,aggregate_records,get_model_fields,build_domain,receivable_payable_aging,accounting_health_summary"
+      ODOO_MCP_ALLOW_UNKNOWN_METHODS: "0"
+      ODOO_MCP_FIELD_POLICY_FILE: "/home/USER/.hermes/odoo-mcp/field_policy.json"
+      ODOO_MCP_INSTRUCTIONS_FILE: "/home/USER/.hermes/odoo-mcp/instructions.txt"
+      ODOO_MCP_RATE_LIMIT_MODE: "block"
+      ODOO_MCP_RATE_LIMIT_MAX_CALLS: "30"
+      ODOO_LOCALE: "vi_VN"
+```
+
+Deliberately **excluded** tools and why:
+
+| Tool | Reason |
+|---|---|
+| `execute_method` | Runs model methods; `create/write/unlink` are blocked but others are not |
+| `read_attachment` | Pulls arbitrary base64 file content out of Odoo |
+| `scan_addons_source` | Reads the host filesystem |
+| `diagnose_access` | Returns the ACL map — a gift to anyone probing |
+| `list_models`, `schema_catalog`, `get_odoo_profile` | Expose model inventory, modules, version |
+| `chatter_post` | Writes to Odoo, gated or not |
+| cross-instance / async / migrate / audit groups | Irrelevant to this use case |
+
+Do **not** set `ODOO_MCP_ENABLE_WRITES`.
+
+Use **stdio** (as above). The HTTP transport ships no authentication —
+`MCP_ALLOW_REMOTE_HTTP=1` exposes an unauthenticated Odoo reader.
+
+### Audit gap
+
+`ODOO_MCP_AUDIT_LOG` records only the write path. Read queries are logged
+**nowhere** — not by mcp-odoo, not by `audit.jsonl`, which captures the
+question and the answer but not the queries between them. If you need "what
+did the bot actually read", add a tool-call hook at the agent layer.

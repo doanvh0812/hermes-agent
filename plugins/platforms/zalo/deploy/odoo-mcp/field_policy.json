@@ -1,0 +1,45 @@
+{
+  "field_acl": {
+    "default": {
+      "res.partner": {
+        "deny": [
+          "vat", "company_registry",
+          "bank_ids", "credit_limit",
+          "comment", "message_ids", "message_follower_ids",
+          "user_id", "team_id",
+          "signup_token", "signup_type", "signup_expiration"
+        ]
+      },
+      "res.users": {
+        "deny": ["password", "new_password", "api_key_ids", "oauth_access_token",
+                 "totp_secret", "login_date", "signature"]
+      },
+      "hr.employee": {
+        "deny": ["ssnid", "sinid", "identification_id", "passport_id",
+                 "bank_account_id", "km_home_work", "private_email",
+                 "private_phone", "private_street", "private_city",
+                 "emergency_contact", "emergency_phone", "birthday",
+                 "children", "marital", "spouse_complete_name",
+                 "certificate", "study_field", "study_school"]
+      },
+      "hr.contract": {
+        "deny": ["wage", "hourly_wage", "notes"]
+      },
+      "account.move": {
+        "deny": ["narration", "message_ids", "message_follower_ids"]
+      },
+      "product.template": {
+        "deny": ["standard_price", "description_purchase", "message_ids"]
+      },
+      "product.product": {
+        "deny": ["standard_price", "description_purchase", "message_ids"]
+      },
+      "sale.order": {
+        "deny": ["margin", "margin_percent", "note", "message_ids"]
+      },
+      "purchase.order": {
+        "deny": ["notes", "message_ids"]
+      }
+    }
+  }
+}
