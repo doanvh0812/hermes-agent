@@ -613,13 +613,20 @@ class ZaloAdapter(BasePlatformAdapter):
                 + "|" + str(self._session_path)
             )
             tok_hash = hashlib.sha256(lock_src.encode()).hexdigest()[:16]
-            if not acquire_scoped_lock("zalo", tok_hash):
+            # Returns (acquired, existing_holder). Testing the tuple itself is
+            # always truthy, so the conflict must be read off the first element.
+            acquired, _existing = acquire_scoped_lock(
+                "zalo", tok_hash, metadata={"platform": "zalo"}
+            )
+            if not acquired:
                 self._set_fatal_error(
                     "lock_conflict",
                     "Zalo account already in use by another profile",
                     retryable=False,
                 )
                 return False
+            # Only record the key we actually hold — releasing on the failure
+            # path would drop the other profile's lock.
             self._lock_key = tok_hash
         except ImportError:
             self._lock_key = None
