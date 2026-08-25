@@ -1,0 +1,4 @@
+bridge/node_modules/
+bridge/zalo-login-qr.png
+__pycache__/
+*.pyc

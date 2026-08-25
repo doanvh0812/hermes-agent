@@ -1,0 +1,13 @@
+{
+  "name": "hermes-zalo-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local loopback bridge between Hermes Agent and a Zalo personal account via the unofficial zca-js library.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "zca-js": "2.1.2"
+  }
+}

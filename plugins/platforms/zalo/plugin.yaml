@@ -1,0 +1,55 @@
+name: zalo-platform
+label: Zalo (Personal)
+kind: platform
+version: 1.0.0
+description: >
+  Zalo personal-account gateway adapter for Hermes Agent.
+  Connects to Zalo via a local Node.js bridge running the unofficial
+  zca-js library and relays messages between personal-account DMs/groups
+  and the Hermes agent.
+
+  WARNING: zca-js uses unofficial Zalo APIs against a PERSONAL account.
+  Zalo may suspend or lock the account used with this adapter — use a
+  secondary account, not your primary one.
+author: NousResearch
+requires_env:
+  - name: ZALO_ENABLED
+    description: "Enable the Zalo personal-account adapter (requires the Node.js bridge)"
+    prompt: "Enable Zalo (personal account)? (true/false)"
+    password: false
+optional_env:
+  - name: ZALO_COOKIE_JSON
+    description: "Zalo session cookie JSON exported from chat.zalo.me (see plugin README)"
+    prompt: "Zalo cookie JSON"
+    password: true
+    category: messaging
+  - name: ZALO_IMEI
+    description: "Browser imei (z_uuid) from localStorage on chat.zalo.me"
+    prompt: "Zalo imei"
+    password: true
+    category: messaging
+  - name: ZALO_USER_AGENT
+    description: "Browser user-agent matching the exported cookie"
+    prompt: "User agent"
+    password: false
+    category: messaging
+  - name: ZALO_ALLOWED_USERS
+    description: "Optional pre-approved Zalo user IDs (otherwise new senders get the pairing-code flow)"
+    prompt: "Allowed users (comma-separated, optional)"
+    password: false
+    category: setting
+  - name: ZALO_ALLOW_ALL_USERS
+    description: "Allow any Zalo user/group to trigger the bot without pairing (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+    category: setting
+  - name: ZALO_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery"
+    prompt: "Home channel ID"
+    password: false
+    category: setting
+  - name: ZALO_BRIDGE_PORT
+    description: "Loopback port for the local zca-js bridge (default 8647)"
+    prompt: "Bridge port"
+    password: false
+    category: setting
