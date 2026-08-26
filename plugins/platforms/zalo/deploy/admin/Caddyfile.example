@@ -9,18 +9,31 @@
 #   caddy start   (background)  /  caddy stop
 #
 # BEFORE THIS WORKS
-#   1. An A record for the name below must point at THIS host (103.214.9.97).
-#      erp.vni.edu.vn does NOT — it resolves to 101.99.3.122, a different
-#      machine. Use a new subdomain, e.g. zalo-admin.vni.edu.vn.
-#   2. Inbound TCP 80 and 443 must be open, on the Windows firewall AND on the
-#      provider's firewall. Port 80 is not optional: Let's Encrypt validates
-#      over it (HTTP-01) before 443 has a certificate to serve.
+#   1. An A record for the name below must point at THIS host, unproxied.
+#      Verify against the zone's AUTHORITATIVE nameserver, not a public
+#      resolver: a wildcard record or a CDN proxy will happily answer for a
+#      name you never created, and the certificate request then goes to the
+#      wrong origin. Compare the answer for a deliberately fake subdomain --
+#      if it matches, you are looking at a wildcard, not your record.
+#   2. Inbound TCP 80 and 443 open, on the Windows firewall AND the provider's.
+#      Caddy chooses the challenge itself (this deployment ended up on
+#      tls-alpn-01 over 443), but keep 80 open: it is the fallback and it
+#      serves the HTTP->HTTPS redirect.
 #   3. The admin panel must be running on 127.0.0.1:8648.
+#
+# TEST WITH THE STAGING CA FIRST. Let's Encrypt allows only 5 failed
+# validations per hostname per hour, and a DNS record pointing at the wrong
+# origin burns them before you can fix it. Add this inside the site block:
+#
+#     tls { ca https://acme-staging-v02.api.letsencrypt.org/directory }
+#
+# Remove it once the log says "certificate obtained successfully", then
+# restart to fetch the real one.
 #
 # The admin process itself refuses to bind anything but loopback, so this proxy
 # is the only way in — TLS is never optional by accident.
 
-zalo-admin.vni.edu.vn {
+zalo-admin.vniedu.vn {
 	encode zstd gzip
 
 	# Caddy sets X-Forwarded-Proto/-Host automatically. The panel reads them to
@@ -47,7 +60,7 @@ zalo-admin.vni.edu.vn {
 # Optional hardening once it works: restrict to the office egress IP so a
 # stolen password is not enough on its own. Replace with your real range.
 #
-# zalo-admin.vni.edu.vn {
+# zalo-admin.vniedu.vn {
 # 	@notoffice not remote_ip 203.0.113.0/24
 # 	respond @notoffice 403
 # 	reverse_proxy 127.0.0.1:8648
