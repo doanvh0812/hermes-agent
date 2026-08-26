@@ -484,7 +484,11 @@ async function poll() {
   if (r.image && qr.src !== r.image) qr.src = r.image;
   switch (r.state) {
     case 'waiting':
-      show('<span class="spin"></span>Đang chờ quét…'); break;
+      // No image yet means Zalo is minting a new code under the same link.
+      show(qr.src
+        ? '<span class="spin"></span>Đang chờ quét…'
+        : '<span class="spin"></span>Đang tạo mã mới…');
+      break;
     case 'scanned':
       show('Đã quét bởi <b>' + (r.userName || '') + '</b> — xác nhận trên điện thoại', 'ok'); break;
     case 'done':
@@ -528,7 +532,22 @@ async function startQrLogin() {
                         qrSession.abort = event.actions.abort;
                     }
                 } else if (t === 1) {
-                    qrSession.state = "expired";
+                    // Zalo's own QR TTL is shorter than the link's. Ask for a
+                    // new code instead of ending the session — the operator's
+                    // page keeps polling and picks it up. Only when the LINK
+                    // itself has expired do we stop.
+                    if (
+                        qrSession.active &&
+                        Date.now() < qrSession.expiresAt &&
+                        event.actions &&
+                        event.actions.retry
+                    ) {
+                        qrSession.image = "";
+                        qrSession.state = "waiting";
+                        event.actions.retry();
+                    } else {
+                        qrSession.state = "expired";
+                    }
                 } else if (t === 2) {
                     qrSession.state = "scanned";
                     qrSession.userName = (event.data && event.data.display_name) || "";
@@ -568,11 +587,34 @@ async function startQrLogin() {
         qrSession.token = "";
         console.log("[zalo-bridge] QR login complete via web; own_id=" + ownId);
     } catch (err) {
+        const msg = String((err && err.message) || err).slice(0, 200);
+        console.error("[zalo-bridge] web QR login failed:", msg);
+
+        // Zalo drops the QR poll on its own — "Cannot get scan result" is the
+        // usual form, and it arrives within a minute or two. That is a dead
+        // QR, not a dead session: the operator's link still has most of its
+        // ten minutes left. Keep the token valid and issue a fresh QR under
+        // it, so the page they already opened simply shows a new code.
+        if (qrSession.active && Date.now() < qrSession.expiresAt) {
+            qrSession.state = "waiting";
+            qrSession.image = "";
+            qrSession.error = "";
+            console.log("[zalo-bridge] re-arming QR under the same link…");
+            setTimeout(() => {
+                if (qrSession.active && Date.now() < qrSession.expiresAt) {
+                    startQrLogin();
+                } else {
+                    qrReset("expired");
+                }
+            }, 1500);
+            return;
+        }
+
+        // Past the window: nothing to retry under, so surface the failure.
         qrSession.state = "error";
-        qrSession.error = String((err && err.message) || err).slice(0, 200);
+        qrSession.error = msg;
         qrSession.active = false;
         qrSession.token = "";
-        console.error("[zalo-bridge] web QR login failed:", qrSession.error);
     }
 }
 
