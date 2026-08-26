@@ -55,7 +55,7 @@ import stat
 import sys
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,6 +116,12 @@ GROUP_PREFIX = "g"
 # attach-on-restart design) is entirely suppressed.
 SEEN_MSG_CAP = 2000
 AUDIT_MAX_TEXT = 500
+# Attachment archive. Zalo's media URLs expire, and Hermes' own document cache
+# is cleared after 24h and dropped once the turn ends — so a file referenced
+# in a later message is gone. Keep our own copy, indexed per sender.
+ATTACH_MAX_BYTES = 25 * 1024 * 1024
+ATTACH_RETENTION_DAYS = 90
+ATTACH_INDEX_PER_CHAT = 50
 # zca-js uses sentinel uids for "@all" mentions.
 MENTION_ALL_UIDS = {"-1", "0"}
 # Friend cache refresh + negative-lookup TTL.
@@ -905,6 +911,143 @@ class ZaloAdapter(BasePlatformAdapter):
         except OSError:
             pass
 
+    async def _archive_attachment(self, url: str, msg: Dict[str, Any],
+                                  sender_id: str, thread_id: str,
+                                  thread_type: str) -> Optional[Dict[str, Any]]:
+        """Download an inbound attachment and record it against the chat.
+
+        Zalo's media URLs are short-lived and Hermes discards its document
+        cache once the turn ends, so "the invoice I sent this morning" cannot
+        be resolved later. Store the bytes ourselves plus an index the skill
+        can consult on a subsequent turn.
+        """
+        try:
+            import aiohttp
+        except ImportError:
+            return None
+
+        base = self._session_path.parent / "attachments"
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        folder = base / day
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+
+        digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+        title = str(msg.get("title") or "").strip()
+        # Keep the original name when it is safe; it is what the user will
+        # refer to ("cái file bảng giá").
+        safe = re.sub(r"[^\w.\-]", "_", title)[:80] if title else ""
+        name = f"{digest}_{safe}" if safe else digest
+        path = folder / name
+
+        if not path.exists():
+            try:
+                timeout = aiohttp.ClientTimeout(total=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            return None
+                        size = 0
+                        with open(path, "wb") as handle:
+                            async for chunk in resp.content.iter_chunked(65536):
+                                size += len(chunk)
+                                if size > ATTACH_MAX_BYTES:
+                                    handle.close()
+                                    path.unlink(missing_ok=True)
+                                    logger.info(
+                                        "Zalo: attachment over %d bytes, skipped",
+                                        ATTACH_MAX_BYTES,
+                                    )
+                                    return None
+                                handle.write(chunk)
+            except Exception as exc:
+                logger.warning("Zalo: attachment download failed: %s", exc)
+                path.unlink(missing_ok=True)
+                return None
+
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "path": str(path),
+            "name": title or name,
+            "sender": sender_id,
+            "thread": thread_id,
+            "thread_type": thread_type,
+            "msg_id": str(msg.get("msg_id") or ""),
+            "size": path.stat().st_size if path.exists() else 0,
+        }
+        self._append_attachment_index(thread_id, record)
+        self._prune_attachments(base)
+        return record
+
+    def _attachment_index_path(self) -> Path:
+        return self._session_path.parent / "attachments" / "index.json"
+
+    def _append_attachment_index(self, thread_id: str,
+                                 record: Dict[str, Any]) -> None:
+        """Index per chat, newest first, bounded. Never raises."""
+        idx_path = self._attachment_index_path()
+        try:
+            data = json.loads(idx_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        entries = data.get(thread_id) or []
+        entries = [e for e in entries if e.get("msg_id") != record["msg_id"]]
+        entries.insert(0, record)
+        data[thread_id] = entries[:ATTACH_INDEX_PER_CHAT]
+        try:
+            tmp = idx_path.with_suffix(".json.tmp")
+            idx_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(idx_path)
+        except OSError:
+            pass
+
+    def _prune_attachments(self, base: Path) -> None:
+        """Drop day-folders past the retention window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=ATTACH_RETENTION_DAYS)
+        try:
+            for folder in base.iterdir():
+                if not folder.is_dir():
+                    continue
+                try:
+                    day = datetime.strptime(folder.name, "%Y-%m-%d").replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    continue
+                if day < cutoff:
+                    for child in folder.iterdir():
+                        child.unlink(missing_ok=True)
+                    folder.rmdir()
+        except OSError:
+            pass
+
+    def _recent_attachments(self, thread_id: str, limit: int = 5) -> str:
+        """A short note listing files this chat sent, for the agent's context.
+
+        Paths are included so the agent can open them; the skill decides
+        whether that is appropriate. Kept terse — this rides along with every
+        message in a chat that has ever sent a file.
+        """
+        try:
+            data = json.loads(self._attachment_index_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        entries = (data.get(thread_id) or [])[:limit] if isinstance(data, dict) else []
+        if not entries:
+            return ""
+        lines = ["[Tệp đã gửi trong cuộc trò chuyện này:]"]
+        for e in entries:
+            when = str(e.get("ts", ""))[:16].replace("T", " ")
+            size_kb = max(1, int(e.get("size", 0)) // 1024)
+            lines.append(f"- {e.get('name')} ({size_kb}KB, {when}) -> {e.get('path')}")
+        return "\n".join(lines)
+
     def _owner_env(self) -> str:
         return _get_scoped_secret("ZALO_OWNER_ID", "") or ""
 
@@ -1499,6 +1642,23 @@ class ZaloAdapter(BasePlatformAdapter):
             chat_name=thread_id,
         )
         mtype, text, media_urls, _labels = classify_inbound(msg)
+
+        # Archive before dispatch: the URL is already expiring, and the agent
+        # may need the file again on a later turn.
+        for media_url in media_urls:
+            record = await self._archive_attachment(
+                media_url, msg, sender_id, thread_id, thread_type
+            )
+            if record:
+                _log("attachment", extra={
+                    "file": record["name"], "size": record["size"],
+                })
+        # Tell the agent what this chat has sent before. Without it the file
+        # exists on disk but the model has no idea it can be referred to.
+        recent = self._recent_attachments(thread_id)
+        if recent and text:
+            text = f"{text}\n\n{recent}"
+
         event = MessageEvent(
             text=text,
             message_type=mtype,

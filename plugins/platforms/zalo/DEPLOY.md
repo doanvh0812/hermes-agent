@@ -991,12 +991,19 @@ this is unconfirmed at the time of writing.
 If you hit it: `hermes gateway run` with `LOG_LEVEL=DEBUG` to capture the
 outgoing request, since the warning reports only that the reply was empty.
 
-### 4. Conversation history does not survive a restart
+### 4. ~~Conversation history does not survive a restart~~ — was wrong
 
-The gateway logs `'zalo' is not a valid Platform` and drops stored session
-entries, because `zalo` is a plugin platform outside the core `Platform`
-enum. Each restart starts every conversation cold. Harmless for one-shot
-lookups, visible to users in a multi-turn exchange.
+This was recorded from a `'zalo' is not a valid Platform` warning seen on the
+**root** profile, and never re-checked against the dedicated one. Measured
+directly: 53 messages in `state.db`, one session spanning 14:05→14:49 across
+four gateway restarts, keyed per sender in both DMs and groups.
+
+```bash
+sqlite3 "$HERMES_HOME/profiles/zalo-bot/state.db" \
+  "SELECT session_id, COUNT(*) FROM messages GROUP BY session_id"
+```
+
+History persists. Nothing to do.
 
 ### 5. ~~Group support unproven~~ — verified live
 
@@ -1066,12 +1073,31 @@ means editing `allowlist.json` by hand or setting `ZALO_OWNER_ID`.
 `add_admin()` exists in the store; the CLI just does not expose a
 "make this person an admin from scratch" flow.
 
-### 7. Attachments are not persisted
+### 7. ~~Attachments are not persisted~~ — done
 
-Files sent to the bot land in Hermes' 24-hour document cache and are
-discarded after the turn. If invoices or documents need to be referenced
-later, write a hook that stores them (MinIO or similar) with sender,
-session, and timestamp metadata at receive time.
+Zalo's media URLs expire and Hermes drops its document cache when the turn
+ends, so "the invoice I sent this morning" could not be resolved.
+
+Inbound attachments are now downloaded to
+`$HERMES_HOME/zalo/attachments/<YYYY-MM-DD>/` and indexed per chat in
+`index.json`. Messages in a chat that has sent files carry a short listing so
+the agent knows those files exist and where they are — otherwise the bytes
+sit on disk and the model never learns it may refer to them.
+
+| Setting | Value |
+|---|---|
+| Size cap | 25 MB (larger is skipped, partial file removed) |
+| Retention | 90 days, pruned by day-folder |
+| Index depth | 50 most recent per chat, 5 surfaced to the agent |
+| Scope | per chat — one group cannot see another's files |
+
+The index is keyed by `msg_id`, so a redelivered event does not duplicate an
+entry. Filenames keep the user's original name (sanitised) prefixed with a
+URL hash, because that is what people refer to.
+
+Skill section 20 covers the agent side: match what the user describes against
+the listing, never read paths aloud, and treat file contents as untrusted
+data like everything else retrieved.
 
 ### 8. Rate limiting is per tool, not per user
 
