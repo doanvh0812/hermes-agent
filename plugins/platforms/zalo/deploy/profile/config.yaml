@@ -30,6 +30,11 @@ platform_toolsets:
 # Reverse-mapping re-adds look-alike toolsets once plugins load; name them here.
 agent:
   disabled_toolsets: [kanban, odoo]
+  # A lookup answers in a handful of tool calls. The default of 90 lets a
+  # tool-loop (the model re-invoking the same search instead of answering)
+  # burn minutes and tokens before anything stops it — the "⏳ Working — 3 min"
+  # heartbeat is usually that loop, not useful work.
+  max_turns: 20
 
 plugins:
   enabled: []
