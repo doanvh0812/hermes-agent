@@ -1,0 +1,54 @@
+# Reverse proxy with automatic HTTPS for the Zalo admin panel.
+#
+# Caddy is used rather than nginx because it obtains and renews a Let's Encrypt
+# certificate on its own — no certbot, no renewal cron, no scheduled task to
+# forget. On Windows that difference matters more than it does on Linux.
+#
+#   winget install CaddyServer.Caddy
+#   caddy run --config C:\path\to\Caddyfile
+#   caddy start   (background)  /  caddy stop
+#
+# BEFORE THIS WORKS
+#   1. An A record for the name below must point at THIS host (103.214.9.97).
+#      erp.vni.edu.vn does NOT — it resolves to 101.99.3.122, a different
+#      machine. Use a new subdomain, e.g. zalo-admin.vni.edu.vn.
+#   2. Inbound TCP 80 and 443 must be open, on the Windows firewall AND on the
+#      provider's firewall. Port 80 is not optional: Let's Encrypt validates
+#      over it (HTTP-01) before 443 has a certificate to serve.
+#   3. The admin panel must be running on 127.0.0.1:8648.
+#
+# The admin process itself refuses to bind anything but loopback, so this proxy
+# is the only way in — TLS is never optional by accident.
+
+zalo-admin.vni.edu.vn {
+	encode zstd gzip
+
+	# Caddy sets X-Forwarded-Proto/-Host automatically. The panel reads them to
+	# decide whether to mark the session cookie Secure and to build the QR
+	# share link against the public origin instead of the bridge's port.
+	reverse_proxy 127.0.0.1:8648
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "no-referrer"
+		-Server
+	}
+
+	log {
+		output file C:\Users\Administrator\AppData\Local\hermes\profiles\zalo-bot\logs\caddy-access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}
+
+# Optional hardening once it works: restrict to the office egress IP so a
+# stolen password is not enough on its own. Replace with your real range.
+#
+# zalo-admin.vni.edu.vn {
+# 	@notoffice not remote_ip 203.0.113.0/24
+# 	respond @notoffice 403
+# 	reverse_proxy 127.0.0.1:8648
+# }

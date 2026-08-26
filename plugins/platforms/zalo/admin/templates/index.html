@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quản trị bot Zalo</title>
+<style>
+  :root{
+    --paper:#F5F7F5; --surface:#fff; --surface-2:#ECEFEC; --line:#D3D9D3;
+    --line-soft:#E3E7E3; --text:#17201C; --text-2:#52605A; --text-3:#7C8A83;
+    --brass:#8A6316; --ok:#1F6144; --ok-bg:#E2EFE7; --warn:#93540F;
+    --warn-bg:#F7EAD9; --risk:#8C2A26; --risk-bg:#F6E3E1; --code:#EDF0ED;
+  }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+    --paper:#101613; --surface:#161E1A; --surface-2:#1D2723; --line:#2C3A34;
+    --line-soft:#223029; --text:#E6ECE8; --text-2:#A3B1AA; --text-3:#75847C;
+    --brass:#D4A843; --ok:#62C38F; --ok-bg:#14301F; --warn:#D9A45C;
+    --warn-bg:#33240F; --risk:#E08A82; --risk-bg:#351B19; --code:#1B2420;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--text);
+       font:15px/1.6 "Segoe UI",system-ui,sans-serif}
+  .wrap{max-width:64rem;margin:0 auto;padding:clamp(1rem,3vw,2rem);
+        display:flex;flex-direction:column;gap:1.5rem}
+
+  header{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;
+         justify-content:space-between}
+  h1{margin:0;font-size:1.25rem}
+  .chips{display:flex;flex-wrap:wrap;gap:.4rem}
+  .chip{font-family:ui-monospace,Consolas,monospace;font-size:.74rem;
+        padding:.25rem .55rem;border-radius:3px;border:1px solid var(--line);
+        background:var(--surface);color:var(--text-2)}
+  .chip.on{background:var(--ok-bg);color:var(--ok);border-color:transparent}
+  .chip.bad{background:var(--risk-bg);color:var(--risk);border-color:transparent}
+
+  nav{display:flex;gap:.25rem;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  nav button{font:inherit;font-size:.9rem;padding:.55rem .9rem;background:none;
+             border:0;border-bottom:2px solid transparent;color:var(--text-2);
+             cursor:pointer}
+  nav button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--brass);
+             font-weight:600}
+  nav button:focus-visible{outline:2px solid var(--brass);outline-offset:-2px}
+
+  .panel{display:none;flex-direction:column;gap:1rem}
+  .panel.on{display:flex}
+
+  .bar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+  input[type=search],select{font:inherit;font-size:.88rem;padding:.4rem .6rem;
+        background:var(--surface);color:var(--text);
+        border:1px solid var(--line);border-radius:4px}
+  .btn{font:inherit;font-size:.85rem;padding:.4rem .7rem;border-radius:4px;
+       border:1px solid var(--line);background:var(--surface);color:var(--text);
+       cursor:pointer}
+  .btn:hover{background:var(--surface-2)}
+  .btn.primary{background:var(--brass);color:#fff;border-color:transparent;font-weight:600}
+  .btn.danger{color:var(--risk)}
+  .btn:focus-visible{outline:2px solid var(--brass);outline-offset:1px}
+  .btn[disabled]{opacity:.5;cursor:not-allowed}
+
+  .tablewrap{overflow-x:auto;border:1px solid var(--line-soft);border-radius:5px;
+             background:var(--surface)}
+  table{border-collapse:collapse;width:100%;font-size:.87rem}
+  th,td{text-align:left;padding:.5rem .75rem;border-bottom:1px solid var(--line-soft);
+        vertical-align:middle}
+  thead th{font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;
+           color:var(--text-3);background:var(--surface-2);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  td.act{white-space:nowrap;text-align:right}
+  td.act .btn{margin-left:.25rem}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:.82em;color:var(--text-3)}
+
+  .state{font-size:.74rem;padding:.15rem .45rem;border-radius:3px;white-space:nowrap}
+  .state.admin{background:var(--warn-bg);color:var(--warn)}
+  .state.allow,.state.friend{background:var(--ok-bg);color:var(--ok)}
+  .state.deny{background:var(--risk-bg);color:var(--risk)}
+  .state.none{background:var(--surface-2);color:var(--text-3)}
+
+  .note{border-left:3px solid var(--brass);background:var(--surface);
+        padding:.7rem .9rem;border-radius:0 4px 4px 0;font-size:.87rem;
+        color:var(--text-2)}
+  .note b{color:var(--text)}
+  #qrbox{display:flex;flex-wrap:wrap;gap:1.25rem;align-items:flex-start}
+  #qrimg{width:230px;height:230px;background:var(--surface-2);border-radius:5px;
+         border:1px solid var(--line-soft);object-fit:contain}
+  #qrside{flex:1;min-width:15rem;display:flex;flex-direction:column;gap:.6rem}
+  #qrlink{width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.76rem;
+          padding:.45rem;background:var(--code);color:var(--text);
+          border:1px solid var(--line);border-radius:4px}
+  .toast{position:fixed;left:50%;bottom:1.5rem;transform:translateX(-50%);
+         background:var(--text);color:var(--paper);padding:.55rem 1rem;
+         border-radius:4px;font-size:.85rem;opacity:0;pointer-events:none;
+         transition:opacity .18s}
+  .toast.show{opacity:1}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Quản trị bot Zalo</h1>
+    <div class="chips" id="chips"><span class="chip">đang tải…</span></div>
+    <form method="post" action="/logout"><button class="btn">Đăng xuất</button></form>
+  </header>
+
+  <nav role="tablist">
+    <button role="tab" data-tab="users"  aria-selected="true">Người dùng</button>
+    <button role="tab" data-tab="groups" aria-selected="false">Nhóm</button>
+    <button role="tab" data-tab="login"  aria-selected="false">Đăng nhập Zalo</button>
+    <button role="tab" data-tab="audit"  aria-selected="false">Nhật ký</button>
+  </nav>
+
+  <!-- ── người dùng ─────────────────────────────────── -->
+  <div class="panel on" id="p-users">
+    <div class="bar">
+      <input type="search" id="fq" placeholder="Lọc theo tên hoặc số…" style="flex:1;min-width:12rem">
+      <label style="font-size:.85rem;color:var(--text-2)">Chế độ
+        <select id="mode">
+          <option value="list">list — chỉ người trong danh sách</option>
+          <option value="friends">friends — mọi bạn bè đều dùng được</option>
+        </select>
+      </label>
+      <button class="btn" id="refresh-users">Tải lại danh bạ</button>
+    </div>
+    <div class="note" id="modenote"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Tên</th><th>Số điện thoại</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="tb-users"><tr><td colspan="4">đang tải…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── nhóm ───────────────────────────────────────── -->
+  <div class="panel" id="p-groups">
+    <div class="bar">
+      <input type="search" id="gq" placeholder="Lọc theo tên nhóm…" style="flex:1;min-width:12rem">
+      <button class="btn" id="refresh-groups">Tải lại danh sách nhóm</button>
+    </div>
+    <div class="note">Nhóm cần <b>cả hai</b>: nhóm được duyệt, và người nhắn cũng phải
+      có quyền dùng bot. Không có cơ chế xét bạn bè cho nhóm — anh không kiểm soát
+      được ai thêm ai vào nhóm.</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Tên nhóm</th><th>Thành viên</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="tb-groups"><tr><td colspan="4">đang tải…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── đăng nhập ──────────────────────────────────── -->
+  <div class="panel" id="p-login">
+    <div class="note">Phiên Zalo hết hạn sau vài ngày. Khi bot ngừng nhận tin,
+      đăng nhập lại ở đây — <b>không cần khởi động lại gateway</b>, tiến trình
+      bridge đang chạy sẽ nhận phiên mới tại chỗ.</div>
+    <div class="bar">
+      <button class="btn primary" id="qrstart">Tạo mã QR đăng nhập</button>
+      <span id="qrstate" style="font-size:.87rem;color:var(--text-2)"></span>
+    </div>
+    <div id="qrbox" hidden>
+      <img id="qrimg" alt="Mã QR đăng nhập Zalo">
+      <div id="qrside">
+        <div style="font-size:.87rem;color:var(--text-2)">
+          Quét bằng app Zalo của <b>tài khoản bot</b>. Mã tự làm mới khi hết hạn.
+        </div>
+        <label style="font-size:.8rem;color:var(--text-3)">Link quét từ điện thoại</label>
+        <input id="qrlink" readonly>
+        <button class="btn" id="qrcopy">Sao chép link</button>
+        <div class="note" style="border-left-color:var(--risk)">
+          <b>Ai mở link này và quét sẽ chiếm tài khoản Zalo của bot.</b>
+          Link hết hạn sau 10 phút và cháy ngay khi đăng nhập xong. Đừng chuyển tiếp.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── nhật ký ────────────────────────────────────── -->
+  <div class="panel" id="p-audit">
+    <div class="bar">
+      <input type="search" id="aq" placeholder="Tìm trong nhật ký…" style="flex:1;min-width:12rem">
+      <button class="btn" id="refresh-audit">Tải lại</button>
+    </div>
+    <div class="note">Nhật ký ghi <b>ai hỏi gì và bot trả lời gì</b> — không ghi
+      truy vấn Odoo ở giữa. Câu "bot đã đọc bản ghi nào" hiện chưa trả lời được.</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Thời điểm</th><th>Chiều</th><th>Kết quả</th><th>Người gửi</th><th>Nội dung</th></tr></thead>
+        <tbody id="tb-audit"><tr><td colspan="5">đang tải…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const CSRF = {{ csrf|tojson }};
+const $ = s => document.querySelector(s);
+let friends = [], groups = [], qrToken = null, qrTimer = null;
+
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2600);
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, opts={}){
+  const r = await fetch(path, {
+    ...opts,
+    headers: {'Content-Type':'application/json','X-CSRF-Token':CSRF, ...(opts.headers||{})}
+  });
+  const body = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+
+// ── tabs ──────────────────────────────────────────────
+document.querySelectorAll('nav button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('nav button').forEach(x=>x.setAttribute('aria-selected','false'));
+    b.setAttribute('aria-selected','true');
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
+    $('#p-' + b.dataset.tab).classList.add('on');
+    if(b.dataset.tab === 'audit') loadAudit();
+    if(b.dataset.tab === 'groups' && !groups.length) loadDir('groups');
+  };
+});
+
+// ── status ────────────────────────────────────────────
+async function loadStatus(){
+  try{
+    const s = await api('/api/status');
+    $('#chips').innerHTML =
+      `<span class="chip ${s.ready?'on':'bad'}">bridge ${s.ready?'đã đăng nhập':'chưa sẵn sàng'}</span>` +
+      `<span class="chip">chế độ ${esc(s.mode)}</span>` +
+      `<span class="chip">${s.counts.allow} được cấp · ${s.counts.deny} bị chặn · ${s.counts.groups} nhóm</span>` +
+      `<span class="chip">${s.admins.length} quản trị</span>`;
+    $('#mode').value = s.mode;
+    $('#modenote').innerHTML = s.mode === 'friends'
+      ? 'Đang ở <b>friends</b>: chấp nhận một lời mời kết bạn tức là cấp quyền dùng bot.'
+      : 'Đang ở <b>list</b>: chỉ người được cấp trong danh sách bên dưới dùng được bot.';
+  }catch(e){ $('#chips').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`; }
+}
+
+// ── directory ─────────────────────────────────────────
+async function loadDir(kind){
+  const tb = kind === 'friends' ? $('#tb-users') : $('#tb-groups');
+  const cols = kind === 'friends' ? 4 : 4;
+  tb.innerHTML = `<tr><td colspan="${cols}">đang tải…</td></tr>`;
+  try{
+    const d = await api('/api/directory?kind=' + kind);
+    if(kind === 'friends') friends = d.rows; else groups = d.rows;
+    render(kind);
+  }catch(e){
+    tb.innerHTML = `<tr><td colspan="${cols}">Không tải được: ${esc(e.message)}<br>
+      <span class="mono">Zalo giới hạn tần suất gọi danh bạ; bridge báo lỗi đó là HTTP 500.
+      Thử lại sau ít phút.</span></td></tr>`;
+  }
+}
+
+function render(kind){
+  const rows  = kind === 'friends' ? friends : groups;
+  const q     = (kind === 'friends' ? $('#fq').value : $('#gq').value).toLowerCase().trim();
+  const tb    = kind === 'friends' ? $('#tb-users') : $('#tb-groups');
+  const list  = rows.filter(r => !q ||
+      r.name.toLowerCase().includes(q) || r.extra.toLowerCase().includes(q));
+
+  if(!list.length){ tb.innerHTML = '<tr><td colspan="4">Không có mục nào khớp.</td></tr>'; return; }
+
+  tb.innerHTML = list.map(r=>{
+    const acts = kind === 'friends' ? friendActions(r) : groupActions(r);
+    return `<tr>
+      <td>${esc(r.name)}<div class="mono">${esc(r.id)}</div></td>
+      <td class="mono">${esc(r.extra) || '—'}</td>
+      <td><span class="state ${r.state}">${esc(r.label)}</span></td>
+      <td class="act">${acts}</td></tr>`;
+  }).join('');
+}
+
+function friendActions(r){
+  const n = JSON.stringify(r.name);
+  let out = '';
+  if(r.state !== 'allow' && r.state !== 'admin')
+    out += `<button class="btn" onclick='act(${JSON.stringify(r.id)},${n},"allow")'>Cho dùng</button>`;
+  if(r.state !== 'deny')
+    out += `<button class="btn danger" onclick='act(${JSON.stringify(r.id)},${n},"deny")'>Chặn</button>`;
+  if(r.state === 'allow' || r.state === 'deny')
+    out += `<button class="btn" onclick='act(${JSON.stringify(r.id)},${n},"clear")'>Bỏ đánh dấu</button>`;
+  out += r.state === 'admin'
+    ? `<button class="btn" onclick='act(${JSON.stringify(r.id)},${n},"unadmin")'>Thu quyền QT</button>`
+    : `<button class="btn" onclick='act(${JSON.stringify(r.id)},${n},"admin")'>Phong QT</button>`;
+  return out;
+}
+
+function groupActions(r){
+  const n = JSON.stringify(r.name);
+  return r.state === 'allow'
+    ? `<button class="btn danger" onclick='act(${JSON.stringify(r.id)},${n},"group_clear")'>Thu quyền</button>`
+    : `<button class="btn" onclick='act(${JSON.stringify(r.id)},${n},"group_allow")'>Duyệt nhóm</button>`;
+}
+
+async function act(id, name, action){
+  try{
+    await api('/api/access', {method:'POST', body: JSON.stringify({id,name,action})});
+    toast('Đã cập nhật — gateway nhận thay đổi trong 5 giây.');
+    await loadStatus();
+    await loadDir(action.startsWith('group') ? 'groups' : 'friends');
+  }catch(e){ toast(e.message); }
+}
+window.act = act;
+
+$('#mode').onchange = async e=>{
+  try{
+    await api('/api/mode', {method:'POST', body: JSON.stringify({mode:e.target.value})});
+    toast('Đã đổi chế độ.');
+    await loadStatus(); await loadDir('friends');
+  }catch(err){ toast(err.message); }
+};
+$('#fq').oninput = ()=>render('friends');
+$('#gq').oninput = ()=>render('groups');
+$('#refresh-users').onclick  = ()=>loadDir('friends');
+$('#refresh-groups').onclick = ()=>loadDir('groups');
+
+// ── QR login ──────────────────────────────────────────
+$('#qrstart').onclick = async ()=>{
+  $('#qrstart').disabled = true;
+  $('#qrstate').textContent = 'đang tạo…';
+  try{
+    const d = await api('/api/qr/start', {method:'POST', body:'{}'});
+    qrToken = d.token || '';
+    // Link tro ve chinh trang admin (/qr proxy), khong phai cong 8647 cua bridge
+    $('#qrlink').value = d.url || '';
+    if(d.reused) toast('Dùng lại phiên QR đang mở.');
+    $('#qrbox').hidden = false;
+    $('#qrstate').textContent = 'chờ quét…';
+    clearInterval(qrTimer);
+    qrTimer = setInterval(pollQR, 2000);
+    pollQR();
+  }catch(e){
+    $('#qrstate').textContent = '';
+    toast(e.message);
+  }finally{ $('#qrstart').disabled = false; }
+};
+
+async function pollQR(){
+  if(!qrToken) return;
+  try{
+    const s = await api('/api/qr/status?t=' + encodeURIComponent(qrToken));
+    if(s.image) $('#qrimg').src = s.image;
+    const map = {
+      waiting:  'chờ quét…',
+      scanned:  'đã quét — xác nhận trên điện thoại',
+      declined: 'bị từ chối trên điện thoại',
+      done:     'đăng nhập xong',
+      expired:  'mã hết hạn — bấm tạo lại',
+    };
+    $('#qrstate').textContent = map[s.state] || s.state || '';
+    if(s.state === 'done'){
+      clearInterval(qrTimer); qrTimer = null;
+      toast('Đăng nhập Zalo thành công.');
+      loadStatus();
+    }
+  }catch(e){ /* mã có thể đã hết hạn; để nguyên trạng thái cuối */ }
+}
+
+$('#qrcopy').onclick = async ()=>{
+  try{ await navigator.clipboard.writeText($('#qrlink').value); toast('Đã sao chép link.'); }
+  catch{ $('#qrlink').select(); toast('Nhấn Ctrl+C để sao chép.'); }
+};
+
+// ── audit ─────────────────────────────────────────────
+async function loadAudit(){
+  const tb = $('#tb-audit');
+  tb.innerHTML = '<tr><td colspan="5">đang tải…</td></tr>';
+  try{
+    const d = await api('/api/audit?limit=300&q=' + encodeURIComponent($('#aq').value));
+    tb.innerHTML = d.rows.length ? d.rows.map(r=>{
+      const cls = {allowed:'allow', denied:'deny', dup:'none', ambient:'none',
+                   sent:'allow', send_failed:'deny', cmd:'admin',
+                   cmd_denied:'deny'}[r.verdict] || 'none';
+      return `<tr>
+        <td class="mono">${esc(r.ts)}</td>
+        <td class="mono">${esc(r.dir)}</td>
+        <td><span class="state ${cls}">${esc(r.verdict)}</span></td>
+        <td class="mono">${esc(r.sender) || '—'}</td>
+        <td>${esc(r.text)}${r.error ? `<div class="mono" style="color:var(--risk)">${esc(r.error)}</div>` : ''}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="5">Chưa có bản ghi nào.</td></tr>';
+  }catch(e){ tb.innerHTML = `<tr><td colspan="5">${esc(e.message)}</td></tr>`; }
+}
+$('#refresh-audit').onclick = loadAudit;
+$('#aq').oninput = ()=>{ clearTimeout(window._aqt); window._aqt = setTimeout(loadAudit, 350); };
+
+// ── init ──────────────────────────────────────────────
+loadStatus();
+loadDir('friends');
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>
