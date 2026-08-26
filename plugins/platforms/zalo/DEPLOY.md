@@ -21,7 +21,7 @@ open the bot to users before step 9 passes.
 ```
  1. Prerequisites          node >= 18, python >= 3.11, uv (for uvx)
  2. Copy the plugin        into $HERMES_HOME/hermes-agent/plugins/platforms/
- 3. QR login               node bridge/index.js --qr-login
+ 3. QR login               --qr-web (headless) or --qr-login (desktop)
  4. Environment            .env: ZALO_ENABLED, ZALO_BRIDGE_TOKEN, ZALO_OWNER_ID
  5. Dedicated profile      ← the actual write barrier; see §"A dedicated profile"
  6. Odoo MCP               credentials + field ACL + instructions
@@ -128,8 +128,56 @@ Node.js >= 18 required.
 
 ## 2. Log in once (QR)
 
+### Headless server — scan from a phone (`--qr-web`)
+
+On a server there is no way to open a PNG. This serves the QR as a web page
+you open on the phone that will scan it:
+
 ```bash
 cd "$HERMES_HOME/hermes-agent/plugins/platforms/zalo/bridge"
+BRIDGE_TOKEN="$ZALO_BRIDGE_TOKEN" node index.js --qr-web
+```
+
+It prints a link and waits:
+
+```
+────────────────────────────────────────────────────────────
+  Mở link này để quét QR (hết hạn sau 10 phút):
+
+  http://192.168.1.50:8647/qr?t=00c84c0a4534bbd6…
+────────────────────────────────────────────────────────────
+```
+
+The page refreshes the QR when Zalo rotates it and shows live status —
+waiting → scanned (with the scanner's name) → done. On success the session is
+written and the bridge takes over the new login **without a restart**.
+
+**Anyone who opens that link and scans takes over the bot's Zalo account.**
+Hence:
+
+| Guard | Behaviour |
+|---|---|
+| Single-use token in the URL | 24 random bytes; wrong or missing → 403 |
+| Expiry | 10 minutes, then 403 even with the right token |
+| Burned on success | the token stops working the moment login completes |
+| Scope | only `/qr` and `/qr/status` skip the loopback Host check — `/events`, `/send`, `/friends` and the rest still require it *and* the bridge token |
+
+Treat the link like a password: it is valid for one login, for ten minutes.
+
+`ZALO_QR_BIND` (default `0.0.0.0`) and `ZALO_QR_HOST` (default: first
+non-loopback IPv4) control the bind address and the hostname printed in the
+link. On a cloud host with no LAN route to your phone, bind to loopback and
+tunnel instead:
+
+```bash
+ssh -L 8647:127.0.0.1:8647 user@server     # from your laptop
+# then on the server:
+ZALO_QR_BIND=127.0.0.1 ZALO_QR_HOST=127.0.0.1 node index.js --qr-web
+```
+
+### Desktop — write the PNG (`--qr-login`)
+
+```bash
 node index.js --qr-login       # writes zalo-login-qr.png; scan with the Zalo app
 ```
 
@@ -152,6 +200,10 @@ ZALO_OWNER_ID=<your Zalo uid>
 ZALO_REQUIRE_MENTION=1        # groups: only answer when tagged
 ZALO_MENTION_ALL_COUNTS=0     # does @all count as tagging the bot
 ZALO_ALLOW_ALL_USERS=0        # keep 0 in production
+
+# QR web login — read only by `--qr-web`, ignored otherwise
+ZALO_QR_BIND=0.0.0.0          # 127.0.0.1 when reaching it over an SSH tunnel
+ZALO_QR_HOST=                 # hostname printed in the link; blank = first LAN IPv4
 
 # optional
 ZALO_BRIDGE_PORT=8647

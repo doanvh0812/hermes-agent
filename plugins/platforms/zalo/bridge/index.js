@@ -325,6 +325,193 @@ async function startServing() {
 // HTTP layer
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// QR login over HTTP
+//
+// Scanning this QR grants full control of the bot's Zalo account, so the page
+// is gated on a single-use token printed to the console at start, expires on
+// its own, and is torn down as soon as login completes.
+// ---------------------------------------------------------------------------
+
+const QR_TTL_MS = 10 * 60 * 1000;
+
+const qrSession = {
+    active: false,
+    token: "",
+    expiresAt: 0,
+    state: "idle", // idle | waiting | scanned | done | expired | declined | error
+    image: "",     // data: URI of the current QR
+    userName: "",
+    userAvatar: "",
+    error: "",
+    abort: null,
+};
+
+function qrSessionValid(token) {
+    return (
+        qrSession.active &&
+        qrSession.token &&
+        token === qrSession.token &&
+        Date.now() < qrSession.expiresAt
+    );
+}
+
+function qrReset(state) {
+    qrSession.active = false;
+    qrSession.state = state || "idle";
+    qrSession.token = "";
+    qrSession.image = "";
+    qrSession.abort = null;
+}
+
+// Served as one self-contained page: the bridge has no static asset pipeline
+// and the page must work on a phone with nothing else installed.
+function qrPageHtml(token) {
+    return `<!doctype html>
+<html lang="vi"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Đăng nhập Zalo Bot</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #f5f5f7; color: #1d1d1f; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .card { background: #2c2c2e !important; }
+  }
+  .card { background: #fff; border-radius: 16px; padding: 28px 32px;
+          box-shadow: 0 2px 18px rgba(0,0,0,.12); text-align: center;
+          max-width: 360px; width: calc(100% - 32px); }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { font-size: 13px; opacity: .65; margin: 0 0 20px; }
+  #qr { width: 260px; height: 260px; object-fit: contain; border-radius: 8px;
+        background: #fff; display: block; margin: 0 auto; }
+  #status { margin-top: 18px; font-size: 14px; min-height: 20px; }
+  .ok { color: #1a8f3c; } .warn { color: #b35c00; } .err { color: #c0362c; }
+  .spin { display: inline-block; width: 14px; height: 14px; margin-right: 6px;
+          border: 2px solid currentColor; border-right-color: transparent;
+          border-radius: 50%; animation: r .8s linear infinite;
+          vertical-align: -2px; }
+  @keyframes r { to { transform: rotate(360deg) } }
+  button { margin-top: 14px; padding: 9px 20px; font-size: 14px;
+           border: 0; border-radius: 8px; background: #0068ff; color: #fff;
+           cursor: pointer; }
+</style></head>
+<body><div class="card">
+  <h1>Đăng nhập Zalo cho bot</h1>
+  <p class="sub">Mở Zalo trên điện thoại → Thêm → Mã QR → quét mã bên dưới</p>
+  <img id="qr" alt="Mã QR đăng nhập">
+  <div id="status"><span class="spin"></span>Đang tạo mã…</div>
+  <button id="retry" style="display:none" onclick="location.reload()">Tạo mã mới</button>
+</div>
+<script>
+const TOKEN = ${JSON.stringify(token)};
+const qr = document.getElementById('qr');
+const st = document.getElementById('status');
+const rt = document.getElementById('retry');
+function show(html, cls) { st.innerHTML = html; st.className = cls || ''; }
+async function poll() {
+  let r;
+  try {
+    r = await (await fetch('/qr/status?t=' + encodeURIComponent(TOKEN))).json();
+  } catch { show('Mất kết nối tới máy chủ.', 'err'); rt.style.display = 'inline-block'; return; }
+  if (r.image && qr.src !== r.image) qr.src = r.image;
+  switch (r.state) {
+    case 'waiting':
+      show('<span class="spin"></span>Đang chờ quét…'); break;
+    case 'scanned':
+      show('Đã quét bởi <b>' + (r.userName || '') + '</b> — xác nhận trên điện thoại', 'ok'); break;
+    case 'done':
+      qr.style.opacity = .25;
+      show('✓ Đăng nhập thành công. Bot đã sẵn sàng — có thể đóng trang này.', 'ok');
+      return;
+    case 'expired':
+      qr.style.opacity = .25;
+      show('Mã đã hết hạn.', 'warn'); rt.style.display = 'inline-block'; return;
+    case 'declined':
+      show('Bạn đã từ chối trên điện thoại.', 'warn'); rt.style.display = 'inline-block'; return;
+    case 'error':
+      show('Lỗi: ' + (r.error || 'không rõ'), 'err'); rt.style.display = 'inline-block'; return;
+    case 'idle':
+      show('Phiên không còn hiệu lực.', 'warn'); rt.style.display = 'inline-block'; return;
+  }
+  setTimeout(poll, 1200);
+}
+poll();
+</script></body></html>`;
+}
+
+async function startQrLogin() {
+    const { Zalo: ZaloCls } = require("zca-js");
+    const zalo = new ZaloCls({ selfListen: false, checkUpdate: false, logging: false });
+    qrSession.state = "waiting";
+
+    try {
+        const api = await zalo.loginQR(
+            { userAgent: process.env.ZALO_USER_AGENT || "" },
+            (event) => {
+                const t = event && event.type;
+                // Numeric enum: 0 generated, 1 expired, 2 scanned, 3 declined, 4 got-info
+                if (t === 0 && event.data && event.data.image) {
+                    const img = String(event.data.image);
+                    qrSession.image = img.startsWith("data:")
+                        ? img
+                        : "data:image/png;base64," + img;
+                    qrSession.state = "waiting";
+                    if (event.actions && event.actions.abort) {
+                        qrSession.abort = event.actions.abort;
+                    }
+                } else if (t === 1) {
+                    qrSession.state = "expired";
+                } else if (t === 2) {
+                    qrSession.state = "scanned";
+                    qrSession.userName = (event.data && event.data.display_name) || "";
+                    qrSession.userAvatar = (event.data && event.data.avatar) || "";
+                } else if (t === 3) {
+                    qrSession.state = "declined";
+                }
+            }
+        );
+
+        // Persist exactly like --qr-login does: cookie login later REQUIRES
+        // imei + userAgent, so all three are captured together.
+        let imei = "", userAgent = process.env.ZALO_USER_AGENT || "", cookie = null;
+        try {
+            const ctx = await api.getContext();
+            imei = ctx.imei || "";
+            userAgent = ctx.userAgent || userAgent;
+            cookie = ctx.cookie || null;
+        } catch {}
+        if (!cookie) cookie = await api.getCookie();
+
+        fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+        const tmp = SESSION_FILE + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(
+            { cookie, imei, userAgent, saved_at: new Date().toISOString() }, null, 2));
+        fs.renameSync(tmp, SESSION_FILE);
+        try { fs.chmodSync(SESSION_FILE, 0o600); } catch {}
+
+        // Take over as the live account without a restart.
+        apiRef = api;
+        try { ownId = String((await api.getOwnId()) || ""); } catch {}
+        attachListener(api);
+        api.listener.start();
+
+        qrSession.state = "done";
+        qrSession.active = false;   // burn the token; the page keeps polling
+        qrSession.token = "";
+        console.log("[zalo-bridge] QR login complete via web; own_id=" + ownId);
+    } catch (err) {
+        qrSession.state = "error";
+        qrSession.error = String((err && err.message) || err).slice(0, 200);
+        qrSession.active = false;
+        qrSession.token = "";
+        console.error("[zalo-bridge] web QR login failed:", qrSession.error);
+    }
+}
+
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
 function hostAllowed(req) {
@@ -372,14 +559,61 @@ function resolveThreadType(name) {
 }
 
 async function handleRequest(req, res) {
+    const url = new URL(req.url, "http://127.0.0.1");
+
+    // The QR pages are reached from a phone on the LAN, so they cannot sit
+    // behind the loopback Host check. They carry their own single-use,
+    // self-expiring token instead — and they are the ONLY routes exempt.
+    const isQrRoute = url.pathname === "/qr" || url.pathname === "/qr/status";
+
     // DNS-rebinding guard: loopback bind alone is not enough when a victim
     // browser resolves an attacker hostname to 127.0.0.1.
-    if (!hostAllowed(req)) {
+    if (!isQrRoute && !hostAllowed(req)) {
         res.writeHead(403).end();
         return;
     }
 
-    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.pathname === "/qr") {
+        const token = url.searchParams.get("t") || "";
+        if (!qrSessionValid(token)) {
+            res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+            res.end("Link không hợp lệ hoặc đã hết hạn.\n"
+                  + "Chạy lại: node index.js --qr-web");
+            return;
+        }
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            // The page embeds only its own inline script and a data: image.
+            "Content-Security-Policy":
+                "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                + "script-src 'unsafe-inline'; connect-src 'self'",
+            "Referrer-Policy": "no-referrer",
+        });
+        res.end(qrPageHtml(token));
+        return;
+    }
+
+    if (url.pathname === "/qr/status") {
+        const token = url.searchParams.get("t") || "";
+        // A finished session burns its token, so the page must still be able
+        // to read the terminal state it was waiting for.
+        const terminal = ["done", "expired", "declined", "error"];
+        if (!qrSessionValid(token) && !terminal.includes(qrSession.state)) {
+            sendJson(res, 403, { state: "idle" });
+            return;
+        }
+        if (qrSession.active && Date.now() >= qrSession.expiresAt) {
+            qrReset("expired");
+        }
+        sendJson(res, 200, {
+            state: qrSession.state,
+            image: qrSession.image,
+            userName: qrSession.userName,
+            error: qrSession.error,
+        });
+        return;
+    }
 
     if (url.pathname === "/health") {
         sendJson(res, 200, {
@@ -552,7 +786,59 @@ async function handleRequest(req, res) {
 // Entry point
 // ---------------------------------------------------------------------------
 
+function lanAddress() {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+        for (const ni of nets[name] || []) {
+            if (ni.family === "IPv4" && !ni.internal) return ni.address;
+        }
+    }
+    return "127.0.0.1";
+}
+
+function announceQrLink() {
+    qrSession.token = crypto.randomBytes(24).toString("hex");
+    qrSession.expiresAt = Date.now() + QR_TTL_MS;
+    qrSession.active = true;
+    qrSession.state = "waiting";
+    qrSession.image = "";
+    qrSession.error = "";
+
+    const host = process.env.ZALO_QR_HOST || lanAddress();
+    const link = `http://${host}:${PORT}/qr?t=${qrSession.token}`;
+    const line = "─".repeat(Math.min(link.length + 4, 78));
+    console.log(
+        `\n${line}\n  Mở link này để quét QR (hết hạn sau ${QR_TTL_MS / 60000} phút):\n\n`
+        + `  ${link}\n\n${line}\n`
+    );
+    startQrLogin();
+}
+
 (async () => {
+    if (process.argv.includes("--qr-web")) {
+        // Serve the bridge, then immediately open a QR session and print the
+        // link. Used on headless hosts where the PNG cannot be opened.
+        if (!TOKEN) {
+            // No session file yet on a fresh host, so the derived token is
+            // empty; require an explicit one rather than serving unauthenticated.
+            console.error(
+                "BRIDGE_TOKEN must be set for --qr-web on a host with no session yet."
+            );
+            process.exit(2);
+        }
+        const server = http.createServer(handleRequest);
+        server.on("error", (err) => {
+            console.error("[zalo-bridge] server error:", err && err.message);
+            process.exit(5);
+        });
+        const bindHost = process.env.ZALO_QR_BIND || "0.0.0.0";
+        server.listen(PORT, bindHost, () => {
+            console.log(`[zalo-bridge] QR server on ${bindHost}:${PORT}`);
+            announceQrLink();
+        });
+        return;
+    }
+
     if (process.argv.includes("--qr-login")) {
         const zalo = new Zalo({ selfListen: false, checkUpdate: false, logging: false });
         try {
