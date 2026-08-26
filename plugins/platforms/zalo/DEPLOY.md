@@ -292,11 +292,35 @@ Non-admins running these get **silence** — the bot must not reveal the
 commands exist. Denials are recorded as `cmd_denied` in the audit log.
 
 ```
-/duyet <code>     approve the stranger from an alert
-/chan <code>      deny-list them instead
-/duyet-nhom       approve the current group (run inside it)
-/ai               show who currently has access
+/duyet <code>       approve the stranger from an alert
+/chan <code>        deny-list them instead
+/duyet-nhom         approve the group you are typing in
+/duyet-nhom <code>  approve a group remotely, from the alert in your DM
+/ai                 show who currently has access
 ```
+
+When an approved user speaks in a group that is not approved yet, admins get
+a DM naming the group, who asked, and a code:
+
+```
+🔔 Nhóm chưa được duyệt
+   Nhóm:      Kế toán VDX
+   Người hỏi: Nguyễn Văn A
+   Nội dung:  "doanh số hôm nay"
+
+   Duyệt:   /duyet-nhom 8d91
+```
+
+That exists because `/duyet-nhom` typed in-place assumes an admin is *in* the
+group — often they are not, and approval would otherwise require getting
+invited first.
+
+Only senders who would pass the gate on their own trigger the alert, so a
+stranger cannot page an admin by messaging any group the bot happens to be
+in. One alert per group per day.
+
+User codes and group codes are separate namespaces: a group code fed to
+`/duyet` is refused rather than filing the group id under users.
 
 In a group, address the bot first — `@Bot /duyet-nhom`. The leading mention
 is stripped before the command is parsed, using the `pos`/`len` spans zca-js

@@ -616,7 +616,10 @@ class ZaloAdapter(BasePlatformAdapter):
         self._friends: Dict[str, Dict[str, str]] = {}
         self._friend_miss: Dict[str, Tuple[float, bool]] = {}
         self._friend_task: Optional[asyncio.Task] = None
-        self._pending_codes: Dict[str, Tuple[str, str, float]] = {}
+        # code -> (kind, target_id, display_name, issued_at); kind is
+        # "user" or "group" so an approval code cannot be redeemed
+        # by the wrong command.
+        self._pending_codes: Dict[str, Tuple[str, str, str, float]] = {}
         self._pending_notified: Dict[str, float] = {}
 
         try:
@@ -705,6 +708,7 @@ class ZaloAdapter(BasePlatformAdapter):
                     "every group message. Check the bridge /health endpoint."
                 )
             await self._refresh_friends()
+            self._sync_gateway_allowlist()
             self._friend_task = asyncio.create_task(self._friend_refresh_loop())
             self._poll_task = asyncio.create_task(self._poll_loop())
             logger.info(
@@ -814,6 +818,7 @@ class ZaloAdapter(BasePlatformAdapter):
 
         await self._refresh_friends()
         self._friend_task = asyncio.create_task(self._friend_refresh_loop())
+        self._sync_gateway_allowlist()
 
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
@@ -974,6 +979,45 @@ class ZaloAdapter(BasePlatformAdapter):
         self._friend_miss[uid] = (now, is_friend)
         return is_friend
 
+    def _sync_gateway_allowlist(self) -> None:
+        """Mirror allowlist.json into ZALO_ALLOWED_USERS.
+
+        There are two independent gates. This adapter's runs first and is the
+        one operators manage (`/duyet`, `zalo_allow.py`, allowlist.json). The
+        gateway's own authz layer runs afterwards and reads the registry's
+        ``allowed_users_env`` — ZALO_ALLOWED_USERS — which knows nothing about
+        any of that.
+
+        A user approved here but absent from that variable therefore passes
+        this gate, is logged ``allowed``, and is then dropped by the gateway
+        with "Unauthorized user" — a silent failure whose only trace is in a
+        log nobody reads. Observed in production after approving a colleague.
+
+        Rather than teach operators to edit two places, publish the union
+        (admins + allowed users) into the env the gateway reads. The denylist
+        is honoured by omission: this adapter has already refused those
+        senders before the gateway is reached.
+        """
+        allowed = set(self._allowlist.admin_ids(self._owner_env()))
+        for entry in self._allowlist.entries("users", "allow"):
+            uid = entry.get("id") if isinstance(entry, dict) else entry
+            if uid:
+                allowed.add(str(uid))
+
+        # In "friends" mode any friend may talk to the bot, so the env
+        # allowlist cannot enumerate them — include the cached friends too.
+        if self._allowlist.mode == "friends":
+            allowed.update(self._friends)
+
+        if not allowed:
+            return
+        current = {p for p in os.environ.get("ZALO_ALLOWED_USERS", "").split(",") if p}
+        if current != allowed:
+            os.environ["ZALO_ALLOWED_USERS"] = ",".join(sorted(allowed))
+            logger.info(
+                "Zalo: synced %d sender(s) into ZALO_ALLOWED_USERS", len(allowed)
+            )
+
     async def _sender_allowed(self, sender_id: str, thread_id: str,
                               is_group: bool, *,
                               bypass_group_check: bool = False) -> bool:
@@ -1106,7 +1150,7 @@ class ZaloAdapter(BasePlatformAdapter):
         code = hashlib.sha1(
             f"{uid}:{int(now // 3600)}".encode("utf-8")
         ).hexdigest()[:4]
-        self._pending_codes[code] = (uid, name, now)
+        self._pending_codes[code] = ("user", uid, name, now)
 
         body = (
             "🔔 Người lạ nhắn bot\n"
@@ -1125,6 +1169,71 @@ class ZaloAdapter(BasePlatformAdapter):
                     "Zalo: could not notify admin %s: %s", admin_id, exc
                 )
 
+    async def _group_name(self, thread_id: str) -> str:
+        """Resolve a group's display name; falls back to its id."""
+        client = self._client
+        if not client:
+            return thread_id
+        try:
+            listing = await client.groups()
+            for group in (listing.get("groups") or []):
+                if str(group.get("id")) == thread_id:
+                    return str(group.get("name") or thread_id)
+        except Exception:
+            pass
+        return thread_id
+
+    async def _notify_admins_group(self, thread_id: str, sender_id: str,
+                                   text: str) -> None:
+        """Ask admins to approve a group they may not be a member of.
+
+        ``/duyet-nhom`` has to be typed inside the group, which assumes an
+        admin is in it. Often they are not — someone adds the bot to a team
+        chat the admin never joins, and approval becomes impossible without
+        first getting invited. This routes the request to their DM instead.
+        """
+        targets = self._allowlist.notify_targets(self._owner_env())
+        if not targets:
+            return
+        now = time.monotonic()
+        key = f"group:{thread_id}"
+        if now - self._pending_notified.get(key, 0.0) < PENDING_NOTIFY_COOLDOWN_SECONDS:
+            return
+        self._pending_notified[key] = now
+
+        group_name = await self._group_name(thread_id)
+        who = sender_id
+        if sender_id in self._friends:
+            who = self._friends[sender_id].get("name") or sender_id
+        elif self._client:
+            try:
+                info = await self._client.user_info(sender_id)
+                who = str(info.get("name") or sender_id)
+            except Exception:
+                pass
+
+        code = hashlib.sha1(
+            f"g:{thread_id}:{int(now // 3600)}".encode("utf-8")
+        ).hexdigest()[:4]
+        self._pending_codes[code] = ("group", thread_id, group_name, now)
+
+        body = (
+            "🔔 Nhóm chưa được duyệt\n"
+            f"   Nhóm:    {group_name}\n"
+            f"   Người hỏi: {who}\n"
+            f'   Nội dung: "{text[:80]}"\n\n'
+            f"   Duyệt:   /duyet-nhom {code}\n"
+            "   Bỏ qua:  (không cần làm gì)"
+        )
+        for admin_id in targets:
+            try:
+                await self.send(format_chat_id(admin_id, "user"), body)
+            except Exception as exc:
+                logger.warning(
+                    "Zalo: could not notify admin %s about group %s: %s",
+                    admin_id, thread_id, exc,
+                )
+
     async def _reply(self, thread_id: str, thread_type: str,
                      message: str) -> None:
         await self.send(format_chat_id(thread_id, thread_type), message)
@@ -1132,6 +1241,14 @@ class ZaloAdapter(BasePlatformAdapter):
     async def _handle_admin_command(self, cmd: List[str], sender_id: str,
                                     thread_id: str, thread_type: str,
                                     is_group: bool) -> None:
+        # Defence in depth: the caller checks this too, but every command below
+        # mutates the allowlist, so the guard belongs where the mutation is
+        # rather than only at the one site that happens to call it today.
+        if not self._is_admin(sender_id):
+            self._audit("cmd_denied", sender=sender_id, thread=thread_id,
+                        thread_type=thread_type, extra={"cmd": cmd[0]})
+            return
+
         verb = cmd[0]
 
         if verb in {"/duyet", "/chan"}:
@@ -1140,14 +1257,19 @@ class ZaloAdapter(BasePlatformAdapter):
                                   f"Cú pháp: {verb} <mã>")
                 return
             entry = self._pending_codes.get(cmd[1])
-            if not entry or time.monotonic() - entry[2] > PENDING_CODE_TTL_SECONDS:
+            # A group code must not be usable here: it would file the group id
+            # under users and quietly grant it nothing while looking like it
+            # worked.
+            if (not entry or entry[0] != "user"
+                    or time.monotonic() - entry[3] > PENDING_CODE_TTL_SECONDS):
                 await self._reply(thread_id, thread_type,
                                   "Mã không đúng hoặc đã hết hạn.")
                 return
-            target_uid, target_name, _ = entry
+            _kind, target_uid, target_name, _ts = entry
             bucket = "allow" if verb == "/duyet" else "deny"
             self._allowlist.add("users", bucket, target_uid, target_name)
             self._pending_codes.pop(cmd[1], None)
+            self._sync_gateway_allowlist()
             self._audit(
                 "approved" if verb == "/duyet" else "blocked",
                 sender=sender_id, thread=thread_id, thread_type=thread_type,
@@ -1163,21 +1285,39 @@ class ZaloAdapter(BasePlatformAdapter):
             return
 
         if verb == "/duyet-nhom":
-            if not is_group:
+            # With a code: approve remotely, from the admin's DM. Without one:
+            # approve the group the command was typed in.
+            if len(cmd) > 1:
+                entry = self._pending_codes.get(cmd[1])
+                if (not entry or entry[0] != "group"
+                        or time.monotonic() - entry[3] > PENDING_CODE_TTL_SECONDS):
+                    await self._reply(thread_id, thread_type,
+                                      "Mã không đúng hoặc đã hết hạn.")
+                    return
+                _kind, target_id, group_name, _ts = entry
+                self._allowlist.add("groups", "allow", target_id, group_name)
+                self._pending_codes.pop(cmd[1], None)
+                self._audit(
+                    "approved_group",
+                    sender=sender_id, thread=target_id, thread_type="group",
+                    extra={
+                        "group_name": group_name,
+                        "by_admin": self._allowlist.admin_name(sender_id),
+                        "remote": True,
+                    },
+                )
                 await self._reply(thread_id, thread_type,
-                                  "Lệnh này chỉ dùng trong nhóm.")
+                                  f'✓ Đã duyệt nhóm "{group_name}".')
                 return
-            group_name = thread_id
-            client = self._client
-            if client:
-                try:
-                    listing = await client.groups()
-                    for group in (listing.get("groups") or []):
-                        if str(group.get("id")) == thread_id:
-                            group_name = str(group.get("name") or thread_id)
-                            break
-                except Exception:
-                    pass
+
+            if not is_group:
+                await self._reply(
+                    thread_id, thread_type,
+                    "Lệnh này dùng trong nhóm, hoặc kèm mã từ thông báo: "
+                    "/duyet-nhom <mã>",
+                )
+                return
+            group_name = await self._group_name(thread_id)
             self._allowlist.add("groups", "allow", thread_id, group_name)
             self._audit(
                 "approved_group",
@@ -1304,7 +1444,13 @@ class ZaloAdapter(BasePlatformAdapter):
             bypass_group_check=is_group_approve and self._is_admin(sender_id),
         ):
             _log("denied")
-            if not is_group:
+            if is_group:
+                # Only worth surfacing when the sender themselves is allowed —
+                # otherwise the group is not the thing being refused, and any
+                # stranger could page the admin by messaging a random group.
+                if await self._sender_allowed(sender_id, thread_id, False):
+                    await self._notify_admins_group(thread_id, sender_id, raw_text)
+            else:
                 await self._notify_admins_pending(sender_id, raw_text)
             return
 
@@ -1336,6 +1482,11 @@ class ZaloAdapter(BasePlatformAdapter):
             return
 
         _log("allowed")
+
+        # Keep the gateway's own allowlist in step before handing the event
+        # over — it re-checks the sender against ZALO_ALLOWED_USERS and drops
+        # anyone missing from it, however this gate ruled.
+        self._sync_gateway_allowlist()
 
         # user_id stays RAW (no prefix): the gateway compares it against
         # ZALO_ALLOWED_USERS and the pairing store — only chat_id carries
