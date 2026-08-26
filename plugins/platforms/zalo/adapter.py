@@ -1842,6 +1842,66 @@ class ZaloAdapter(BasePlatformAdapter):
     def format_message(self, content: str) -> str:
         return strip_markdown_preserving_urls(content)
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render the clarify prompt in Vietnamese.
+
+        The base implementation hardcodes its instruction line in English
+        (``gateway/platforms/base.py``: "Reply with the number, the option
+        text, or your own answer."). It is a literal, not an i18n lookup, so
+        adding a locale file cannot reach it — and Hermes ships no ``vi``
+        locale anyway. The base docstring names overriding this method as the
+        supported extension point, so the string lives here rather than in a
+        patch to core.
+
+        Everything else follows the base contract: keep the ❓ prefix and the
+        numbered list, and call ``mark_awaiting_text`` for the multiple-choice
+        path so the gateway's text-intercept captures a typed reply. Zalo has
+        no button UI, so both modes are plain text.
+        """
+        if choices:
+            is_multi = False
+            try:
+                from tools import clarify_gateway as _cg
+
+                with _cg._lock:
+                    entry = _cg._entries.get(clarify_id)
+                is_multi = bool(entry and getattr(entry, "multi_select", False))
+            except Exception:
+                is_multi = False
+
+            lines = [f"❓ {question}", ""]
+            for i, choice in enumerate(choices, start=1):
+                lines.append(f"  {i}. {choice}")
+            lines.append("")
+            if is_multi:
+                lines.append(
+                    "Anh/chị chọn nhiều mục được ạ — trả lời bằng các số cách "
+                    'nhau bởi dấu phẩy (ví dụ "1, 3"), hoặc gõ nội dung lựa '
+                    "chọn, hoặc câu trả lời riêng của anh/chị."
+                )
+            else:
+                lines.append(
+                    "Anh/chị trả lời bằng số thứ tự, hoặc gõ nội dung lựa "
+                    "chọn, hoặc câu trả lời riêng của anh/chị ạ."
+                )
+            text = "\n".join(lines)
+
+            from tools.clarify_gateway import mark_awaiting_text
+
+            mark_awaiting_text(clarify_id)
+        else:
+            text = f"❓ {question}"
+
+        return await self.send(chat_id, text, metadata=metadata)
+
     async def send_image_file(
         self,
         chat_id: str,
