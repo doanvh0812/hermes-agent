@@ -957,8 +957,13 @@ class ZaloAdapter(BasePlatformAdapter):
         # 4. Groups must be approved explicitly. `bypass_group_check` exists
         #    for /duyet-nhom: an admin has to run it INSIDE the unapproved
         #    group, which the check above would otherwise block forever.
-        if is_group and not bypass_group_check:
-            if not self._allowlist.group_allowed(thread_id):
+        if is_group and not self._allowlist.group_allowed(thread_id):
+            # The bypass exists so an admin can run /duyet-nhom INSIDE a group
+            # that is not approved yet — without it, approving a group is
+            # impossible. Re-check admin here rather than trusting the flag:
+            # a caller that sets it for a non-admin would otherwise open every
+            # unapproved group to that user.
+            if not (bypass_group_check and self._is_admin(sender_id)):
                 return False
 
         return True

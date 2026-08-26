@@ -196,6 +196,28 @@ for i in range(CAP + 100):
     is_dup(f"flood{i}")
 check("LRU bounded", len(seen) <= CAP, True)
 
+
+# ---------------------------------------------------------------------------
+# group gate — payload shapes taken from zca-js TGroupMessage
+# ---------------------------------------------------------------------------
+print("\n=== group mention payloads ===")
+BOT2 = "638527951485115695"
+GROUP_CASES = [
+    ("tagged", {"raw": {"mentions": [{"uid": BOT2, "pos": 0, "len": 8, "type": 0}]}}, True),
+    ("someone else tagged", {"raw": {"mentions": [{"uid": "999", "pos": 0}]}}, False),
+    ("several, bot among them", {"raw": {"mentions": [{"uid": "999"}, {"uid": BOT2}]}}, True),
+    ("plain group chatter", {"raw": {"content": "chào cả nhà"}}, False),
+    ("mentions empty", {"raw": {"mentions": []}}, False),
+    ("mentions null", {"raw": {"mentions": None}}, False),
+    ("@all ignored by default", {"raw": {"mentions": [{"uid": "-1"}]}}, False),
+    ("malformed entries survived", {"raw": {"mentions": ["junk", None, {"uid": BOT2}]}}, True),
+]
+for label, msg, want in GROUP_CASES:
+    check(f"group: {label}", mentions_self(msg, BOT2), want)
+check("group: @all when enabled",
+      mentions_self({"raw": {"mentions": [{"uid": "-1"}]}}, BOT2,
+                    honor_mention_all=True), True)
+
 # ---------------------------------------------------------------------------
 print(f"\n{'=' * 46}")
 print(f"PASS {len(PASS)}   FAIL {len(FAIL)}")

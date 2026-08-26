@@ -969,12 +969,38 @@ entries, because `zalo` is a plugin platform outside the core `Platform`
 enum. Each restart starts every conversation cold. Harmless for one-shot
 lookups, visible to users in a multi-turn exchange.
 
-### 5. Group support is untested
+### 5. Group support: logic verified, live path still unproven
 
-Mention-gating is implemented and unit-tested, but has not run against a real
-Zalo group — the deployment it was built on had none. Before enabling groups:
-approve one with `/duyet-nhom`, confirm untagged messages log as `ambient`,
-and confirm a tagged message is answered.
+The gate and the mention parser are covered by `test_gate.py` against the
+payload shapes zca-js actually emits (`TGroupMessage.mentions` entries with
+`uid`/`pos`/`len`/`type`), including malformed and null variants. The access
+matrix is exercised too:
+
+| Sender | Group | Result |
+|---|---|---|
+| allowed user | approved | passes |
+| allowed user | not approved | blocked |
+| stranger | approved | blocked |
+| admin | not approved | passes |
+| admin running `/duyet-nhom` | not approved | passes (bypass) |
+| non-admin claiming the bypass | not approved | **blocked** |
+
+That last row was a real hole: `bypass_group_check` used to be honoured
+whichever caller set it, so the gate was safe only because
+`_handle_bridge_event` happened to check admin first. It now re-checks admin
+inside `_sender_allowed`, so the flag alone grants nothing.
+
+**What is still unproven:** no message has passed through a real Zalo group
+end to end — the account this was built on belongs to none. Before opening
+groups to users:
+
+1. Add the bot to one group.
+2. Admin runs `/duyet-nhom` in it — must approve even though the group is not
+   yet on the list.
+3. Send an untagged message — nothing should be answered, `audit.jsonl`
+   records `ambient`.
+4. Tag the bot — must answer, recorded as `allowed`.
+5. Have a non-approved member tag it — must stay silent, recorded `denied`.
 
 `ZALO_MENTION_ALL_COUNTS` decides whether `@all` counts as addressing the
 bot. Default off; turning it on in a busy group makes the bot answer every
@@ -1001,11 +1027,29 @@ rapid questions consumes the budget for everyone, turning a protection into
 a denial-of-service vector. A per-`zalo_user_id` limit belongs in the
 adapter, with the MCP limit kept as a lower backstop.
 
-### 9. Alerts go to syslog only
+### 9. ~~Alerts go to syslog only~~ — done
 
-`zalo-health.sh` calls `logger`. Nobody reads syslog. Point it at something
-that reaches a person — ntfy, a Telegram bot, email — or the silent failure
-modes stay silent.
+`zalo-health.sh` now sends to Telegram (and still logs to syslog). Telegram
+is chosen deliberately: it is a different transport from the one being
+monitored, so a dead Zalo cannot swallow the alert about itself.
+
+It reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_HOME_CHANNEL` from `.env`, or
+`ZALO_ALERT_TG_TOKEN` / `ZALO_ALERT_TG_CHAT` to send somewhere else. With
+neither configured it falls back to `logger` alone.
+
+Four conditions are checked, each invisible by other means:
+
+| Check | Why it matters |
+|---|---|
+| gateway unit active | nothing polls the bridge; the bot is simply mute |
+| `/health` reachable | the node process died or lost the port |
+| `ready: true` | the cookie expired — needs a QR re-login |
+| token accepted | token drift; `/send` still works so it looks healthy |
+
+Alerts fire on the **transition** into failure, not every run — a bridge that
+stays broken must not page every ten minutes, which only teaches people to
+ignore it. Recovery sends one message too. Set `ZALO_GATEWAY_UNIT=` to skip
+the systemd check on non-systemd hosts.
 
 ### 10. Two gateways, two failure surfaces
 
