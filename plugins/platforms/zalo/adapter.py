@@ -1188,6 +1188,19 @@ class ZaloAdapter(BasePlatformAdapter):
             try:
                 data = await self._client.events(self._event_cursor)
                 cursor = int(data.get("cursor", self._event_cursor))
+                if cursor < self._event_cursor:
+                    # The bridge restarted: its ring buffer and cursor reset
+                    # to 0 while ours persisted. Holding the old value would
+                    # silently drop every event until the new bridge caught
+                    # up to it — the first N messages after a re-login would
+                    # never reach the agent. Follow it back down; msg_id
+                    # dedup still suppresses anything already handled.
+                    logger.info(
+                        "Zalo: bridge cursor reset (%d -> %d); realigning",
+                        self._event_cursor, cursor,
+                    )
+                    self._event_cursor = cursor
+                    self._save_dedup_state()
                 for evt in data.get("events", []):
                     try:
                         await self._handle_bridge_event(evt)
