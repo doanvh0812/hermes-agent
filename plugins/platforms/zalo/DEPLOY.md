@@ -24,10 +24,13 @@ open the bot to users before step 9 passes.
  3. QR login               --qr-web (headless) or --qr-login (desktop)
  4. Environment            .env: ZALO_ENABLED, ZALO_BRIDGE_TOKEN, ZALO_OWNER_ID
  5. Dedicated profile      ← the actual write barrier; see §"A dedicated profile"
+                           a profile inherits NOTHING: provider, keys, env,
+                           and state all have to be carried over by hand
  6. Odoo MCP               credentials + field ACL + instructions
  7. Access list            allowlist.json, admins, mode
- 8. Ops                    health cron + logrotate
- 9. Verify                 profile in effect, writes refused, no replay
+ 8. Hand over Zalo         ZALO_ENABLED=false in root, drop its odoo MCP
+ 9. Ops                    health cron + logrotate, monitor BOTH gateways
+10. Verify                 profile in effect, provider works, writes refused
 ```
 
 ### 1. Prerequisites
@@ -85,7 +88,15 @@ tail -5 "$HERMES_HOME/zalo/audit.jsonl"
 #    -> no old messages re-answered; repeats appear as verdict "dup"
 ```
 
-d. From Zalo, ask the bot to **create** something ("tạo 5 liên hệ test"). It
+```bash
+# e. the profile can actually reach the model — this fails LAST, only once a
+#    user messages the bot, so check it before they do
+journalctl --user -u hermes-gateway-zalo --since "5 min ago" \
+  | grep -i "provider auth failed"
+#    -> any hit means model/custom_providers or the API keys did not carry over
+```
+
+f. From Zalo, ask the bot to **create** something ("tạo 5 liên hệ test"). It
 must refuse. If it offers to do it, or starts describing how, step 5 is not
 in effect — stop and fix that before continuing.
 
@@ -387,11 +398,46 @@ mid-session with nothing in any log.
 **Fix:** always set `ZALO_BRIDGE_TOKEN`. `bridge_token_for_session()`
 prefers it and only falls back to the racy hash when it is unset.
 
+### The listener dies quietly after a web QR login
+
+`--qr-web` installed the new login but skipped the keepalive the normal
+serving path sets up. A few minutes later the listener stopped delivering
+while everything else kept reporting health: `/health` said `ready`, `/send`
+returned real message ids, the gateway said `connected`. Inbound messages
+simply stopped arriving.
+
+Both login paths now share `startKeepAlive()`, and the listener re-starts
+itself on `error`, `closed`, and `end` instead of only logging.
+
+Symptom to recognise: the bot sends fine (cron delivery works, `/send` from
+curl works) but answers nothing, and `/events` stays at `cursor: 0` no matter
+what you send it.
+
 ### Session expiry
 
 Cookies die (Zalo-side revocation, ~days). The bridge logs
 `login failed: Đăng nhập thất bại` in a loop and nothing else happens.
 Re-run `node index.js --qr-login`.
+
+### Cursor drift in either direction
+
+The adapter persists its event cursor so a gateway restart does not replay
+the bridge's ring buffer. The mirror case had to be handled too: when the
+**bridge** restarts, its counter returns to 0 while the adapter's persisted
+value does not, so the adapter polls `?since=9` against a bridge at 0 and
+every reply is empty — the first N messages after a re-login vanish in
+silence.
+
+A cursor lower than ours can only mean the bridge restarted, so the adapter
+follows it back down and logs it. `msg_id` dedup is what makes that safe.
+
+If the bot goes quiet right after a re-login, compare the two:
+
+```bash
+curl -s -H "X-Bridge-Token: $ZALO_BRIDGE_TOKEN" '127.0.0.1:8647/events?since=0' \
+  | python3 -c 'import json,sys; print("bridge:", json.load(sys.stdin)["cursor"])'
+python3 -c 'import json; print("adapter:", json.load(open("'"$HERMES_HOME"'/zalo/seen.json"))["cursor"])'
+```
 
 ### Two connect paths
 
@@ -562,11 +608,84 @@ directory is named `profiles`, that directory *is* the profile. So
 Consequence: keeping a terminal-enabled agent on Telegram or the CLI while
 Zalo runs locked down requires **two gateway processes**, one per profile.
 
+#### What a profile does and does not inherit
+
+This is where a split deployment goes wrong, so it is worth stating plainly:
+**a profile inherits nothing from the root profile.** Not the model provider,
+not API keys, not the platform env, not the state directory. `hermes profile
+create` gives you an empty shell, and every omission fails at a different
+moment — some only once a user sends a message.
+
+Each of the following was hit while bringing this up on a real host:
+
+| Missing | Symptom |
+|---|---|
+| `model` + `custom_providers` | Bot replies "Provider authentication failed"; the log says *No inference provider configured*. The message reached the agent — only the LLM call failed. |
+| provider API keys in `.env` | Same as above. Copying only `ANTHROPIC_*`-style names is not enough when the provider is a `custom:` entry defined in `config.yaml`. |
+| `ZALO_*` env | Adapter never starts; the platform sits `disconnected` with no error. |
+| `zalo/` state directory | The adapter resolves session, allowlist, and audit paths from `HERMES_HOME`, so it looks inside the profile and finds nothing. It then tries to log in with no session. |
+| `~/.local/bin` in the unit's PATH | `MCP server 'odoo' failed: missing executable 'uvx'`. systemd user units do not inherit your shell PATH. |
+
 #### Create the profile
 
 ```bash
 hermes profile create zalo-bot
 ```
+
+Then carry over the four things it does not create for you:
+
+```bash
+ROOT="$HERMES_HOME"
+P="$HERMES_HOME/profiles/zalo-bot"
+
+# 1. State — share it rather than copy it. The bridge session, the allowlist,
+#    the audit log and the dedup cursor must not fork into two divergent sets.
+ln -sfn "$ROOT/zalo" "$P/zalo"
+
+# 2. Env — platform config plus every provider credential.
+grep -E '^(ZALO_|ODOO_API_KEY|ANTHROPIC_|OPENAI_|OPENROUTER_|GOOGLE_|GEMINI_|GROQ_|XAI_|MISTRAL_|DEEPSEEK_|AZURE_|LITELLM_|NOUS_)' \
+    "$ROOT/.env" > "$P/.env"
+chmod 600 "$P/.env"
+
+# 3. Home channel, so the bot stops asking on first contact.
+echo "ZALO_HOME_CHANNEL=u<your-zalo-uid>" >> "$P/.env"
+
+# 4. Verify the provider actually came across — see below.
+```
+
+**Check the env copy caught a provider key.** A `grep` that matches nothing
+exits quietly and leaves you with a bot that receives messages and cannot
+answer:
+
+```bash
+grep -cE '^(ANTHROPIC|OPENAI|OPENROUTER|GOOGLE|GEMINI|GROQ|XAI|MISTRAL|DEEPSEEK|AZURE|LITELLM|NOUS)' "$P/.env"
+# 0 means no provider credential was copied — fix before starting the gateway
+```
+
+If the root profile uses a `custom:` provider, the credential lives in
+`config.yaml`, not in `.env`, and no grep over `.env` will find it. Copy both
+keys into the profile config:
+
+```bash
+python3 - <<'EOF'
+import yaml, os
+from pathlib import Path
+root = Path(os.environ["HERMES_HOME"])
+src = yaml.safe_load((root / "config.yaml").read_text())
+dst_path = root / "profiles/zalo-bot/config.yaml"
+dst = yaml.safe_load(dst_path.read_text())
+dst["model"] = src["model"]                      # incl. provider: custom:<name>
+if "custom_providers" in src:
+    dst["custom_providers"] = src["custom_providers"]
+dst_path.write_text(yaml.dump(dst, sort_keys=False, allow_unicode=True))
+dst_path.chmod(0o600)
+print("provider carried over:", dst["model"])
+EOF
+```
+
+`${VAR}` in a profile config is **not** interpolated — write the literal
+secret (and `chmod 600`), or the MCP server receives the placeholder string
+and Odoo rejects it.
 
 `$HERMES_HOME/profiles/zalo-bot/config.yaml` — write it minimal rather than
 copying the root config, which drags in terminal and every toolset:
@@ -615,9 +734,45 @@ ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run
 Restart=always
 ```
 
-Disable Zalo (`ZALO_ENABLED`) in the root profile's env so the two gateways
-do not both try to own the bridge — the adapter's scoped lock will reject the
-second one, but it is cleaner not to race for it.
+#### Hand Zalo over from the root profile
+
+Two gateways must not drive the same Zalo login. Turn it off in the root
+profile's `.env` **before** starting the second gateway:
+
+```bash
+sed -i 's/^ZALO_ENABLED=.*/ZALO_ENABLED=false/' "$HERMES_HOME/.env"
+systemctl --user restart hermes-gateway          # root profile
+systemctl --user start hermes-gateway-zalo       # the locked-down one
+```
+
+The scoped lock does reject the second holder, but relying on it means one of
+the two gateways fails at startup for a reason that looks like a bug.
+
+**Also remove the Odoo MCP server from the root profile.** Once Zalo has its
+own gateway, the root profile has no reason to hold production Odoo
+credentials — and it still has a terminal, so nothing there is constrained by
+the 7-tool allowlist or the field ACL. Leaving it configured re-opens exactly
+the hole the split closes:
+
+```bash
+python3 - <<'EOF'
+import yaml, os
+from pathlib import Path
+p = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+d = yaml.safe_load(p.read_text())
+if "odoo" in (d.get("mcp_servers") or {}):
+    d["mcp_servers"].pop("odoo")
+    p.write_text(yaml.dump(d, sort_keys=False, allow_unicode=True))
+    print("removed odoo MCP from the root profile")
+EOF
+systemctl --user restart hermes-gateway
+```
+
+#### Both gateways need monitoring
+
+`systemctl --user status hermes-gateway hermes-gateway-zalo`. The health
+script only covers the bridge; neither gateway watches the other, and a dead
+`hermes-gateway-zalo` looks exactly like a quiet bot.
 
 #### Verify the profile is actually in effect
 
@@ -787,6 +942,25 @@ and it is exposed until someone adds it to the policy.
 
 A dedicated read-only Odoo user with record rules does not have that
 property. See "Running against a high-privilege Odoo account".
+
+### 3b. Unresolved: "Model returned no content" on the root profile
+
+Seen on the host this was built on, after the Odoo MCP server was added to
+the **root** profile (before the split): the root gateway began returning
+`Empty response (no content or reasoning)` through all three retries, on
+Telegram.
+
+Ruled out by direct testing: the provider endpoint answers HTTP 200 with
+content, including for a ~60k-character prompt, and the config and env files
+match their pre-change backups apart from the intended edits.
+
+The remaining suspect is tool-schema volume — that profile carried `odoo` and
+`omni` MCP servers plus the full toolset. Removing the Odoo MCP from the root
+profile is step 8 above and is worth doing regardless; whether it resolves
+this is unconfirmed at the time of writing.
+
+If you hit it: `hermes gateway run` with `LOG_LEVEL=DEBUG` to capture the
+outgoing request, since the warning reports only that the reply was empty.
 
 ### 4. Conversation history does not survive a restart
 

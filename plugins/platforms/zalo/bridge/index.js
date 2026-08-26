@@ -219,6 +219,21 @@ async function loginQR(zalo) {
 
 let apiRef = null;
 let ownId = "";
+let keepAliveTimer = null;
+
+// Ping Zalo and rotate the stored cookie. Both login paths need this: without
+// it the listener stops receiving after a few minutes while every other
+// health signal still says the bridge is fine.
+function startKeepAlive(api) {
+    if (keepAliveTimer) {
+        clearInterval(keepAliveTimer);
+    }
+    keepAliveTimer = setInterval(() => {
+        Promise.resolve(api.keepAlive()).catch(() => {});
+        saveSession(api);
+    }, 30 * 60 * 1000);
+    keepAliveTimer.unref();
+}
 
 function threadTypeName(t) {
     return t === ThreadType.Group ? "group" : "user";
@@ -258,7 +273,41 @@ function attachListener(api) {
     });
     api.listener.on("error", (err) => {
         console.error("[zalo-bridge] listener error:", err && err.message);
+        scheduleListenerRestart(api, "error");
     });
+
+    // zca-js also ends the stream without surfacing an error — the listener
+    // simply stops delivering. /health and /send keep working, so nothing
+    // downstream notices: the bot appears connected and answers nothing.
+    const onClosed = () => scheduleListenerRestart(api, "closed");
+    if (typeof api.listener.on === "function") {
+        api.listener.on("closed", onClosed);
+        api.listener.on("end", onClosed);
+    }
+}
+
+let listenerRestartTimer = null;
+
+function scheduleListenerRestart(api, why) {
+    if (listenerRestartTimer) {
+        return;
+    }
+    listenerRestartTimer = setTimeout(() => {
+        listenerRestartTimer = null;
+        if (apiRef !== api) {
+            return; // a newer login took over
+        }
+        try {
+            console.log(`[zalo-bridge] listener ${why}; restarting…`);
+            api.listener.start();
+        } catch (err) {
+            console.error(
+                "[zalo-bridge] listener restart failed:",
+                (err && err.message) || err
+            );
+        }
+    }, 3000);
+    listenerRestartTimer.unref();
 }
 
 async function startServing() {
@@ -290,10 +339,7 @@ async function startServing() {
     api.listener.start();
 
     saveSession(api);
-    setInterval(() => {
-        Promise.resolve(api.keepAlive()).catch(() => {});
-        saveSession(api);
-    }, 30 * 60 * 1000).unref();
+    startKeepAlive(api);
 
     const server = http.createServer(handleRequest);
     server.on("error", (err) => {
@@ -581,6 +627,12 @@ async function startQrLogin() {
         try { ownId = String((await api.getOwnId()) || ""); } catch {}
         attachListener(api);
         api.listener.start();
+
+        // Same upkeep the normal serving path installs. Without it the
+        // listener goes quiet after a few minutes — the bridge still accepts
+        // /send and reports ready, but no inbound event ever arrives, so the
+        // bot looks alive and answers nothing.
+        startKeepAlive(api);
 
         qrSession.state = "done";
         qrSession.active = false;   // burn the token; the page keeps polling
