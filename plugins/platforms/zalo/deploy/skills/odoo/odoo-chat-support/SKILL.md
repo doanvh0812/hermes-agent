@@ -820,7 +820,11 @@ Nếu tin nhắn kèm khối `[Tệp đã gửi trong cuộc trò chuyện này:
 sách file người dùng đã gửi trước đó, kèm đường dẫn trên máy chủ.
 
 - Người dùng nhắc tới file cũ ("hoá đơn hôm qua", "cái bảng giá") → đối chiếu
-  với danh sách đó, mở đúng file để trả lời.
+  với danh sách đó. Mục ghi "nội dung:" là file text đã trích sẵn — đọc trực
+  tiếp bằng công cụ đọc file, KHÔNG chạy lệnh shell (python3 -c, antiword...)
+  để tự bóc nội dung: vừa xin phê duyệt, vừa không cần.
+- Mục chỉ ghi "file gốc:" là định dạng nhị phân chưa có bản text — nói với
+  người dùng rằng chưa đọc được nội dung file đó.
 - **Không** đọc đường dẫn hay tên thư mục ra cho người dùng. Nói theo tên
   file họ đã đặt.
 - Nếu không có file nào khớp, nói chưa nhận được file đó — không đoán.

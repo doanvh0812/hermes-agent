@@ -52,6 +52,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from collections import OrderedDict
@@ -252,11 +253,15 @@ def parse_chat_id(chat_id: str) -> Tuple[str, str]:
 _URL_RE = re.compile(r"https?://[^\s\"'\\<>]+")
 
 _PARAM_TYPE_MAP = (
-    (("image", "photo"), MessageType.PHOTO),
-    (("video",), MessageType.VIDEO),
-    (("voice", "audio"), MessageType.VOICE),
+    # File shares carry a bare extension (fileExt), so list the common ones
+    # explicitly — matching on the word "file" alone never fires for a .doc.
+    (("image", "photo", "jpg", "jpeg", "png", "gif", "webp", "heic"),
+     MessageType.PHOTO),
+    (("video", "mp4", "mov", "avi", "mkv", "webm"), MessageType.VIDEO),
+    (("voice", "audio", "mp3", "m4a", "aac", "wav", "ogg"), MessageType.VOICE),
     (("sticker",), MessageType.STICKER),
-    (("file", "attach"), MessageType.DOCUMENT),
+    (("file", "attach", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+      "pdf", "txt", "csv", "zip", "rar"), MessageType.DOCUMENT),
 )
 
 
@@ -374,6 +379,22 @@ def classify_inbound(msg: Dict[str, Any]) -> Tuple[MessageType, str, List[str], 
             for p in params:
                 if isinstance(p, dict):
                     param_types.append(str(p.get("type", "")).lower())
+
+        # File attachments arrive differently: `params` (singular) holding a
+        # JSON *string* with fileExt/fileSize, and the download URL on `href`.
+        # Reading only `parameters` classified every document as plain text
+        # with no media URL, so nothing was ever archived.
+        raw_params = content_obj.get("params")
+        if isinstance(raw_params, str) and raw_params.strip():
+            try:
+                parsed = json.loads(raw_params)
+                if isinstance(parsed, dict):
+                    ext = str(parsed.get("fileExt") or "").lower()
+                    if ext:
+                        param_types.append(ext)
+            except ValueError:
+                pass
+
         blob = json.dumps(content_obj, ensure_ascii=False)
         urls = [u.rstrip(".,);") for u in _URL_RE.findall(blob)]
         mtype = MessageType.TEXT
@@ -935,7 +956,15 @@ class ZaloAdapter(BasePlatformAdapter):
             return None
 
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+        # The display name lives in content_obj.title; msg["title"] is empty
+        # for untagged attachment-only events, which produced hash-only names
+        # nobody could recognise.
         title = str(msg.get("title") or "").strip()
+        raw = msg.get("raw")
+        if isinstance(raw, dict):
+            co_title = str(raw.get("title") or "").strip()
+            if co_title:
+                title = co_title
         # Keep the original name when it is safe; it is what the user will
         # refer to ("cái file bảng giá").
         safe = re.sub(r"[^\w.\-]", "_", title)[:80] if title else ""
@@ -976,10 +1005,75 @@ class ZaloAdapter(BasePlatformAdapter):
             "thread_type": thread_type,
             "msg_id": str(msg.get("msg_id") or ""),
             "size": path.stat().st_size if path.exists() else 0,
+            "text_path": None,
         }
+
+        # Extract text now, while the file arrives. Doing it lazily would push
+        # the agent into shell commands — python3 -c with zipfile — which trip
+        # the approval prompt on every read and cannot parse legacy .doc (OLE2,
+        # not zip) anyway. antiword/pdftotext are cheap and read-only.
+        text_path = self._extract_text(path, name)
+        if text_path:
+            record["text_path"] = str(text_path)
+
         self._append_attachment_index(thread_id, record)
         self._prune_attachments(base)
         return record
+
+    def _extract_text(self, path: Path, name: str) -> Optional[Path]:
+        """Best-effort text extraction alongside the stored file.
+
+        Returns None when nothing suitable exists — the file is still stored
+        and usable; only its text is unavailable. Extraction failures are not
+        fatal and must never block archiving.
+        """
+        suffix = Path(name).suffix.lower()
+        # antiword handles legacy .doc; pdftotext covers .pdf. Office XML
+        # formats (.docx/.xlsx) are zip archives — read the main part with
+        # stdlib rather than shelling out.
+        commands = {
+            ".doc": ["antiword", str(path)],
+            ".pdf": ["pdftotext", "-q", str(path), "-"],
+        }
+        try:
+            if suffix == ".docx":
+                import zipfile as zf
+                from xml.etree import ElementTree
+                with zf.ZipFile(path) as archive:
+                    blob = archive.read("word/document.xml")
+                root = ElementTree.fromstring(blob)
+                ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                text = "\n".join(
+                    "".join(node.itertext())
+                    for node in root.iter(f"{ns}p")
+                )
+            elif suffix == ".doc" or (suffix == ".pdf"
+                                      and shutil.which("pdftotext")):
+                cmd = commands.get(suffix)
+                if not cmd or not shutil.which(cmd[0]):
+                    return None
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=30,
+                    stdin=subprocess.DEVNULL,
+                )
+                if result.returncode != 0:
+                    return None
+                text = result.stdout.decode("utf-8", errors="replace")
+            else:
+                return None
+        except Exception as exc:
+            logger.debug("Zalo: text extraction failed for %s: %s", name, exc)
+            return None
+
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            out = path.with_suffix(path.suffix + ".txt")
+            out.write_text(text, encoding="utf-8")
+            return out
+        except OSError:
+            return None
 
     def _attachment_index_path(self) -> Path:
         return self._session_path.parent / "attachments" / "index.json"
@@ -1045,7 +1139,14 @@ class ZaloAdapter(BasePlatformAdapter):
         for e in entries:
             when = str(e.get("ts", ""))[:16].replace("T", " ")
             size_kb = max(1, int(e.get("size", 0)) // 1024)
-            lines.append(f"- {e.get('name')} ({size_kb}KB, {when}) -> {e.get('path')}")
+            # When extracted text exists, point at it: reading that file is a
+            # plain read, whereas opening the original .doc/.pdf would push
+            # the agent into shell commands and approval prompts.
+            target = e.get("text_path") or e.get("path")
+            kind = "nội dung" if e.get("text_path") else "file gốc"
+            lines.append(
+                f"- {e.get('name')} ({size_kb}KB, {when}; {kind}: {target})"
+            )
         return "\n".join(lines)
 
     def _owner_env(self) -> str:
@@ -1607,6 +1708,24 @@ class ZaloAdapter(BasePlatformAdapter):
             honor_all = _truthy_env("ZALO_MENTION_ALL_COUNTS", False)
             if not mentions_self(msg, self._own_id,
                                  honor_mention_all=honor_all):
+                # Zalo sends an attachment as its own message, with no text
+                # and therefore no mention — the caption arrives separately.
+                # Dropping it here means "@Bot đọc file này" refers to
+                # something that was never archived. Keep the file, skip the
+                # agent: the sender already passed the gate above.
+                _mtype, _t, _urls, _lbl = classify_inbound(msg)
+                if _urls:
+                    for media_url in _urls:
+                        record = await self._archive_attachment(
+                            media_url, msg, sender_id, thread_id, thread_type
+                        )
+                        if record:
+                            _log("attachment", extra={
+                                "file": record["name"],
+                                "size": record["size"],
+                                "untagged": True,
+                            })
+                    return
                 # v1 drops ambient traffic. v2 could buffer it into the
                 # session transcript so a later @mention has context.
                 _log("ambient")
