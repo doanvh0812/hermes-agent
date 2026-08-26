@@ -1098,6 +1098,7 @@ Four conditions are checked, each invisible by other means:
 | `/health` reachable | the node process died or lost the port |
 | `ready: true` | the cookie expired — needs a QR re-login |
 | token accepted | token drift; `/send` still works so it looks healthy |
+| Odoo authenticates | an API key is revoked by a password change or deleted from the profile; the bot keeps answering and just says it cannot look anything up, which reads like a data problem |
 
 Alerts fire on the **transition** into failure, not every run — a bridge that
 stays broken must not page every ten minutes, which only teaches people to

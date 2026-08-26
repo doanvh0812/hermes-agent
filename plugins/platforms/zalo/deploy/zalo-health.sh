@@ -94,4 +94,45 @@ else
     logger -t zalo-bridge "WARN: ZALO_BRIDGE_TOKEN chưa đặt; không phát hiện được token drift"
 fi
 
+# ---- 5. Odoo credential ---------------------------------------------------
+# Odoo API keys are revoked by a password change and can be deleted from the
+# user's profile — neither of which reaches this host. The bot keeps running
+# and simply tells everyone it cannot look anything up, which reads like a
+# data problem rather than an expired key. Verified: this exact failure went
+# unnoticed until a user asked why answers had stopped.
+ODOO_URL="$(envval ODOO_URL)"
+ODOO_DB="$(envval ODOO_DB)"
+ODOO_USER="$(envval ODOO_USERNAME)"
+ODOO_KEY="$(envval ODOO_API_KEY)"
+# Profile configs carry the credential inline; fall back to the profile file.
+PROFILE_CFG="${ZALO_PROFILE_CONFIG:-$HERMES_HOME/profiles/zalo-bot/config.yaml}"
+if [ -z "$ODOO_URL" ] && [ -f "$PROFILE_CFG" ]; then
+    # Split on the FIRST colon only — the value itself contains one
+    # ("https://..."), and a greedy match silently produces "//host".
+    cfgval() {
+        grep -m1 "^ *$1:" "$PROFILE_CFG" \
+            | sed "s/^ *$1: *//; s/^[\"']//; s/[\"']$//"
+    }
+    ODOO_URL="$(cfgval ODOO_URL)"
+    ODOO_DB="$(cfgval ODOO_DB)"
+    ODOO_USER="$(cfgval ODOO_USERNAME)"
+    ODOO_KEY="$(cfgval ODOO_PASSWORD)"
+fi
+
+if [ -n "$ODOO_URL" ] && [ -n "$ODOO_KEY" ]; then
+    AUTH_XML="<?xml version=\"1.0\"?><methodCall><methodName>authenticate</methodName><params><param><value><string>${ODOO_DB}</string></value></param><param><value><string>${ODOO_USER}</string></value></param><param><value><string>${ODOO_KEY}</string></value></param><param><value><struct/></value></param></params></methodCall>"
+    RESP="$(curl -s --max-time 15 -H 'Content-Type: text/xml' \
+            -d "$AUTH_XML" "${ODOO_URL}/xmlrpc/2/common" 2>/dev/null)"
+    if [ -z "$RESP" ]; then
+        fail "Odoo không phản hồi" "Không kết nối được ${ODOO_URL}."
+    fi
+    # A successful authenticate returns the uid as <int>; a failed one returns
+    # boolean false.
+    if ! grep -qE '<int>[0-9]+</int>' <<<"$RESP"; then
+        fail "Odoo API key không dùng được" \
+             "Bot vẫn trả lời nhưng không tra được dữ liệu.
+Tạo key mới: My Profile → Account Security → New API Key"
+    fi
+fi
+
 recovered
