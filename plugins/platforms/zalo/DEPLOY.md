@@ -969,7 +969,7 @@ entries, because `zalo` is a plugin platform outside the core `Platform`
 enum. Each restart starts every conversation cold. Harmless for one-shot
 lookups, visible to users in a multi-turn exchange.
 
-### 5. Group support: logic verified, live path still unproven
+### 5. ~~Group support unproven~~ — verified live
 
 The gate and the mention parser are covered by `test_gate.py` against the
 payload shapes zca-js actually emits (`TGroupMessage.mentions` entries with
@@ -981,25 +981,49 @@ matrix is exercised too:
 | allowed user | approved | passes |
 | allowed user | not approved | blocked |
 | stranger | approved | blocked |
-| admin | not approved | passes |
+| admin | not approved | **passes — see below** |
 | admin running `/duyet-nhom` | not approved | passes (bypass) |
 | non-admin claiming the bypass | not approved | **blocked** |
+
+**Admins skip the group check entirely.** Rule 0 (`if _is_admin: return
+True`) returns before the group rule is reached, so an admin can use the bot
+in any group without approving it first. That is intentional here — it keeps
+the operator from being locked out of their own bot — but it means an
+approved group list is enforced for everyone *except* admins. If you need
+admins held to the same rule, move the admin check below the group check and
+keep only the `/duyet-nhom` bypass.
+
+Practical consequence: `/ai` may show zero approved groups while the bot is
+answering in a group. That is admin access, not a stale allowlist.
 
 That last row was a real hole: `bypass_group_check` used to be honoured
 whichever caller set it, so the gate was safe only because
 `_handle_bridge_event` happened to check admin first. It now re-checks admin
 inside `_sender_allowed`, so the flag alone grants nothing.
 
-**What is still unproven:** no message has passed through a real Zalo group
-end to end — the account this was built on belongs to none. Before opening
-groups to users:
+**Verified live** against a three-member group. Observed in `audit.jsonl`:
+
+```
+in  denied   …outsider  'Helo'                    not on the allowlist
+in  ambient  …admin     'Test'                    no mention -> silent
+in  allowed  …admin     '@Bot hi'                 tagged -> answered
+out sent                'Chào anh. Anh cần tra…'
+in  denied   …outsider  '@Bot doanh số hôm nay'   tagging does NOT bypass
+in  allowed  …admin     '@Bot doanh số hôm nay'
+out sent                'Hiện em chưa truy cập…'
+```
+
+The fifth line is the one worth noting: a non-approved member tagging the bot
+is still refused. Mention-gating decides whether an *authorised* sender is
+addressing the bot; it is not itself an authorisation.
+
+Repeat these steps on a new deployment before opening groups to users:
 
 1. Add the bot to one group.
-2. Admin runs `/duyet-nhom` in it — must approve even though the group is not
-   yet on the list.
-3. Send an untagged message — nothing should be answered, `audit.jsonl`
-   records `ambient`.
-4. Tag the bot — must answer, recorded as `allowed`.
+2. Admin runs `/duyet-nhom` in it (needed for non-admin members; admins
+   themselves already pass — see the note above).
+3. Send an untagged message — must stay silent, recorded `ambient`.
+4. Tag the bot — must answer, recorded `allowed`.
 5. Have a non-approved member tag it — must stay silent, recorded `denied`.
 
 `ZALO_MENTION_ALL_COUNTS` decides whether `@all` counts as addressing the
