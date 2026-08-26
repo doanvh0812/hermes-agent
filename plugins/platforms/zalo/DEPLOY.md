@@ -298,6 +298,11 @@ commands exist. Denials are recorded as `cmd_denied` in the audit log.
 /ai               show who currently has access
 ```
 
+In a group, address the bot first — `@Bot /duyet-nhom`. The leading mention
+is stripped before the command is parsed, using the `pos`/`len` spans zca-js
+attaches to each mention rather than counting tokens, since display names
+routinely contain spaces.
+
 ## 4b. Managing access from the terminal
 
 `zalo_allow.py` lists friends and groups **by name and phone number** and

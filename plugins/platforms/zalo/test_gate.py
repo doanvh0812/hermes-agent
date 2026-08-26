@@ -139,11 +139,12 @@ check("missing file -> env admin ok", s4.is_admin("envadmin", "envadmin"), True)
 # ---------------------------------------------------------------------------
 print("\n=== mentions_self ===")
 src = (PLUGIN / "adapter.py").read_text(encoding="utf-8")
-start = src.index("def mentions_self")
+start = src.index("def strip_leading_mentions")
 end = src.index("def classify_inbound")
 ns: dict = {"MENTION_ALL_UIDS": {"-1", "0"}, "Dict": dict, "Any": object}
-exec(compile(src[start:end], "mentions_self", "exec"), ns)
+exec(compile(src[start:end], "mention_helpers", "exec"), ns)
 mentions_self = ns["mentions_self"]
+strip_leading_mentions = ns["strip_leading_mentions"]
 
 BOT = "bot999"
 check("tagged", mentions_self({"raw": {"mentions": [{"uid": BOT}]}}, BOT), True)
@@ -217,6 +218,46 @@ for label, msg, want in GROUP_CASES:
 check("group: @all when enabled",
       mentions_self({"raw": {"mentions": [{"uid": "-1"}]}}, BOT2,
                     honor_mention_all=True), True)
+
+
+# ---------------------------------------------------------------------------
+# strip_leading_mentions — commands must survive the @-mention that addresses
+# the bot, otherwise /duyet-nhom is unusable in the only place it applies
+# ---------------------------------------------------------------------------
+print("\n=== strip_leading_mentions ===")
+BOT3 = "638527951485115695"
+STRIP_CASES = [
+    ("span: command after mention",
+     {"raw": {"mentions": [{"uid": BOT3, "pos": 0, "len": 9}]}},
+     "@Bot Name /duyet-nhom", "/duyet-nhom"),
+    ("span: multi-word display name",
+     {"raw": {"mentions": [{"uid": BOT3, "pos": 0, "len": 13}]}},
+     "@Nguyễn Văn A /ai", "/ai"),
+    ("span: two leading mentions",
+     {"raw": {"mentions": [{"uid": BOT3, "pos": 0, "len": 4},
+                           {"uid": "9", "pos": 5, "len": 4}]}},
+     "@Bot @Ai  /duyet-nhom", "/duyet-nhom"),
+    ("span: mention mid-sentence is kept",
+     {"raw": {"mentions": [{"uid": BOT3, "pos": 6, "len": 4}]}},
+     "chào @Bot nhé", "chào @Bot nhé"),
+    ("span: mention only", {"raw": {"mentions": [{"uid": BOT3, "pos": 0, "len": 9}]}},
+     "@Bot Name", ""),
+    ("fallback: no span, command present", {"raw": {}},
+     "@Bot Name /duyet-nhom", "/duyet-nhom"),
+    ("fallback: no span, multi-word name", {"raw": {}},
+     "@Nguyễn Văn A /ai", "/ai"),
+    ("fallback: no span, plain question", {"raw": {}},
+     "@Bot doanh số hôm nay", "@Bot doanh số hôm nay"),
+    ("dm: no mention at all", {}, "/duyet-nhom", "/duyet-nhom"),
+]
+for label, msg, text, want in STRIP_CASES:
+    check(label, strip_leading_mentions(msg, text), want)
+
+# the regression itself: the command token must be reachable
+_cmd = strip_leading_mentions(
+    {"raw": {"mentions": [{"uid": BOT3, "pos": 0, "len": 9}]}},
+    "@Bot Name /duyet-nhom").split()
+check("group command parses to /duyet-nhom", _cmd[0] if _cmd else None, "/duyet-nhom")
 
 # ---------------------------------------------------------------------------
 print(f"\n{'=' * 46}")

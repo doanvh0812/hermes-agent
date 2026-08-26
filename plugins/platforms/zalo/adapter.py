@@ -273,6 +273,56 @@ def _load_allowlist_store():
     return module.AllowlistStore
 
 
+def strip_leading_mentions(msg: Dict[str, Any], text: str) -> str:
+    """Remove @-mention prefixes so a command can be parsed from a group message.
+
+    Addressing the bot in a group means the text arrives as
+    ``"@Bot Name /duyet-nhom"``. Splitting that on whitespace yields ``"@Bot"``
+    as the first token, so every admin command was unreachable in exactly the
+    place ``/duyet-nhom`` has to be used.
+
+    zca-js gives each mention a ``pos``/``len`` span over the raw text, so cut
+    by span rather than guessing where a display name ends — names contain
+    spaces, and Vietnamese names commonly contain several.
+    """
+    raw = msg.get("raw")
+    spans = []
+    if isinstance(raw, dict) and isinstance(raw.get("mentions"), list):
+        for mention in raw["mentions"]:
+            if not isinstance(mention, dict):
+                continue
+            try:
+                pos = int(mention.get("pos"))
+                length = int(mention.get("len"))
+            except (TypeError, ValueError):
+                continue
+            if pos >= 0 and length > 0:
+                spans.append((pos, pos + length))
+
+    if spans:
+        # Drop only mentions anchored at the start (allowing whitespace
+        # between them); a mention inside the sentence is part of the message.
+        cursor = 0
+        for start, end in sorted(spans):
+            if start > cursor and text[cursor:start].strip():
+                break
+            cursor = max(cursor, end)
+        return text[cursor:].strip()
+
+    # No usable spans (older payloads, or a client that omits them). Display
+    # names contain spaces, so token-by-token trimming cannot tell where the
+    # name ends. Only rescue the case that matters — a command somewhere after
+    # a leading mention — and leave ordinary text untouched.
+    stripped = text.strip()
+    if not stripped.startswith("@"):
+        return stripped
+    tokens = stripped.split()
+    for i, token in enumerate(tokens):
+        if token.startswith("/"):
+            return " ".join(tokens[i:])
+    return stripped
+
+
 def mentions_self(msg: Dict[str, Any], own_id: str,
                   *, honor_mention_all: bool = False) -> bool:
     """True when a group message @-mentions the bot account.
@@ -1243,7 +1293,9 @@ class ZaloAdapter(BasePlatformAdapter):
                         thread_type=thread_type, msg_id=msg_id,
                         text=raw_text, **kwargs)
 
-        cmd = raw_text.strip().split()
+        # In a group the text starts with the @-mention that addressed the
+        # bot, so commands must be read after it.
+        cmd = strip_leading_mentions(msg, raw_text).split()
         is_group_approve = bool(cmd) and cmd[0] == "/duyet-nhom"
 
         # ---- GATE 1: allowlist (drop before any expensive work) ----
