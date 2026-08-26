@@ -720,19 +720,71 @@ and Odoo rejects it.
 copying the root config, which drags in terminal and every toolset:
 
 ```yaml
-model: max
+model:
+  default: max
+  provider: custom:9router-claude   # + matching custom_providers entry
+custom_providers:
+  - name: 9router-claude
+    base_url: "http://llm-host/v1"
+    api_key: "sk-..."               # literal, not ${VAR} — see above
 terminal:
-  enabled: false        # the single most important line in this file
-toolsets:
-  enabled: false
+  enabled: false        # belt. platform_toolsets below is the suspenders.
 plugins:
   enabled: []
+agent:
+  disabled_toolsets: [kanban, odoo]   # duplicates that reverse-mapping adds
+platform_toolsets:
+  zalo: [file, vision, clarify, session_search, memory, skills, mcp-odoo]
 mcp_servers:
   odoo:
     command: uvx
     args: [odoo-mcp]
     env:
       # ... same block as the MCP section below ...
+```
+
+#### Tool surface: `platform_toolsets`, not `toolsets.enabled`
+
+`toolsets.enabled: false` looks like it disables every toolset. It does
+nothing — on this deployment a terminal tool kept executing under it until
+the user denied the approval prompt. The mechanism Hermes actually reads is
+`platform_toolsets`, keyed by platform name (plugin platforms use their
+registry key, here `zalo`):
+
+| Key | Tools | Purpose |
+|---|---|---|
+| `file` | read_file, write_file, patch, search_files | read archived attachments; no approval prompt |
+| `vision` | vision_analyze | images users send |
+| `clarify` | clarify | ask when a request is ambiguous |
+| `session_search` | session_search | find earlier conversation |
+| `memory` | memory | keep context across turns |
+| `skills` | skills_list, skill_view | odoo-chat-support rules |
+| `mcp-odoo` | 7 Odoo read tools | business data |
+
+Two naming/behaviour traps, both hit here:
+
+- The MCP server's toolset is named `mcp-<server>` — **`mcp-odoo`**, with a
+  hyphen. Writing `mcp_odoo` makes Hermes treat it as an unknown composite,
+  which triggers toolset expansion and pulls in tools you never listed.
+- Anything you list gets run through reverse-mapping once plugins load, which
+  can add look-alike toolsets (`kanban`, a duplicate `odoo`). Silence them
+  explicitly with `agent.disabled_toolsets`.
+
+Verify what actually resolves rather than trusting the YAML:
+
+```bash
+cd "$HERMES_HOME/hermes-agent" && venv/bin/python - <<'EOF'
+import sys, os, yaml
+sys.path.insert(0, ".")
+os.environ["HERMES_HOME"] = os.path.expanduser("~/.hermes")
+cfg = yaml.safe_load(open(os.environ["HERMES_HOME"] + "/profiles/zalo-bot/config.yaml"))
+from hermes_cli.tools_config import _get_platform_tools
+from toolsets import resolve_toolset
+ts = sorted(_get_platform_tools(cfg, "zalo"))
+tools = sorted({t for name in ts for t in resolve_toolset(name)})
+print(len(tools), "tools:", ", ".join(tools))
+assert "terminal" not in tools, "terminal leaked into the chat profile!"
+EOF
 ```
 
 #### The profile's SOUL.md carries the full rules
