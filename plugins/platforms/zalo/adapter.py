@@ -602,6 +602,94 @@ def bridge_token_for_session(session_path: Path) -> str:
 # Adapter
 # ---------------------------------------------------------------------------
 
+_XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XLSX_MAX_ROWS_PER_SHEET = 500
+
+
+def _xlsx_column_index(ref: str) -> int:
+    """Turn a cell reference like ``BC12`` into a zero-based column index.
+
+    Rows skip empty cells entirely, so without this a row whose first value
+    sits in column C would render shifted two columns left and silently
+    misalign against its header.
+    """
+    match = re.match(r"([A-Z]+)", ref or "")
+    if not match:
+        return 0
+    n = 0
+    for ch in match.group(1):
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _xlsx_to_text(path: Path) -> str:
+    """Render a workbook as tab-separated text, using only the stdlib.
+
+    openpyxl is not in the Hermes venv and this must not add a dependency.
+    An .xlsx is a zip of XML, so the sheets are readable directly — the same
+    approach the .docx branch already takes.
+
+    Two encodings of a string cell exist and both appear in the wild:
+    ``t="s"`` indexes into xl/sharedStrings.xml, while ``t="inlineStr"`` holds
+    the text inside the cell. The file that prompted this had no shared-strings
+    part at all, so handling only the first would have produced empty output.
+    """
+    import zipfile as zf
+    from xml.etree import ElementTree
+
+    chunks: List[str] = []
+    with zf.ZipFile(path) as archive:
+        names = set(archive.namelist())
+
+        shared: List[str] = []
+        if "xl/sharedStrings.xml" in names:
+            root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = ["".join(si.itertext()) for si in root.iter(f"{_XLSX_NS}si")]
+
+        # Sheet display names, in workbook order — "Bảng giá" is worth more to
+        # the reader than "sheet3.xml".
+        titles: List[str] = []
+        if "xl/workbook.xml" in names:
+            wb = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+            titles = [s.get("name", "") for s in wb.iter(f"{_XLSX_NS}sheet")]
+
+        sheets = sorted(n for n in names if n.startswith("xl/worksheets/sheet"))
+        for index, sheet_name in enumerate(sheets):
+            root = ElementTree.fromstring(archive.read(sheet_name))
+            title = titles[index] if index < len(titles) else sheet_name.rsplit("/", 1)[-1]
+            rows: List[str] = []
+            truncated = False
+            for row in root.iter(f"{_XLSX_NS}row"):
+                cells: Dict[int, str] = {}
+                for cell in row.iter(f"{_XLSX_NS}c"):
+                    kind = cell.get("t")
+                    value_node = cell.find(f"{_XLSX_NS}v")
+                    if kind == "s" and value_node is not None and (value_node.text or "").isdigit():
+                        idx = int(value_node.text)
+                        value = shared[idx] if idx < len(shared) else ""
+                    elif kind == "inlineStr":
+                        inline = cell.find(f"{_XLSX_NS}is")
+                        value = "".join(inline.itertext()) if inline is not None else ""
+                    else:
+                        value = value_node.text if value_node is not None else ""
+                    value = (value or "").strip()
+                    if value:
+                        cells[_xlsx_column_index(cell.get("r", ""))] = value
+                if cells:
+                    width = max(cells) + 1
+                    rows.append("\t".join(cells.get(i, "") for i in range(width)))
+                if len(rows) >= XLSX_MAX_ROWS_PER_SHEET:
+                    truncated = True
+                    break
+            if rows:
+                if truncated:
+                    rows.append(
+                        f"[... còn nữa, chỉ lấy {XLSX_MAX_ROWS_PER_SHEET} dòng đầu]"
+                    )
+                chunks.append(f"=== {title} ===\n" + "\n".join(rows))
+    return "\n\n".join(chunks)
+
+
 class ZaloAdapter(BasePlatformAdapter):
     """Zalo personal-account gateway adapter (via the local zca-js bridge)."""
 
@@ -956,19 +1044,45 @@ class ZaloAdapter(BasePlatformAdapter):
             return None
 
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
-        # The display name lives in content_obj.title; msg["title"] is empty
-        # for untagged attachment-only events, which produced hash-only names
-        # nobody could recognise.
+        # The display name lives in content_obj.title. The previous version
+        # said so but then read msg["raw"]["title"] — content_obj is a SIBLING
+        # of raw, not nested inside it — so a document arrived as a bare hash
+        # with no name and no extension. That in turn made _extract_text bail
+        # immediately, since it dispatches on Path(name).suffix.
         title = str(msg.get("title") or "").strip()
+        content_obj = msg.get("content_obj")
+        if not title and isinstance(content_obj, dict):
+            title = str(content_obj.get("title") or "").strip()
         raw = msg.get("raw")
-        if isinstance(raw, dict):
-            co_title = str(raw.get("title") or "").strip()
-            if co_title:
-                title = co_title
+        if not title and isinstance(raw, dict):
+            title = str(raw.get("title") or "").strip()
+
+        # Zalo puts the real extension in content_obj.params — a JSON *string*
+        # carrying fileExt/fileSize (classify_inbound already parses it for
+        # type detection). It is the only reliable source: the title may be
+        # missing entirely, and when present it does not always carry a suffix.
+        file_ext = ""
+        if isinstance(content_obj, dict):
+            raw_params = content_obj.get("params")
+            if isinstance(raw_params, str) and raw_params.strip():
+                try:
+                    parsed = json.loads(raw_params)
+                    if isinstance(parsed, dict):
+                        file_ext = re.sub(
+                            r"[^\w]", "", str(parsed.get("fileExt") or "")
+                        ).lower()[:12]
+                except ValueError:
+                    pass
+
         # Keep the original name when it is safe; it is what the user will
         # refer to ("cái file bảng giá").
         safe = re.sub(r"[^\w.\-]", "_", title)[:80] if title else ""
         name = f"{digest}_{safe}" if safe else digest
+        # Always end up with a suffix, even when the title was missing or
+        # already carried one — extraction and every downstream reader key off
+        # it. Without this the file is stored correctly and is still unusable.
+        if file_ext and not name.lower().endswith(f".{file_ext}"):
+            name = f"{name}.{file_ext}"
         path = folder / name
 
         if not path.exists():
@@ -1047,6 +1161,10 @@ class ZaloAdapter(BasePlatformAdapter):
                     "".join(node.itertext())
                     for node in root.iter(f"{ns}p")
                 )
+            elif suffix in (".xlsx", ".xlsm"):
+                text = _xlsx_to_text(path)
+                if not text:
+                    return None
             elif suffix == ".doc" or (suffix == ".pdf"
                                       and shutil.which("pdftotext")):
                 cmd = commands.get(suffix)
