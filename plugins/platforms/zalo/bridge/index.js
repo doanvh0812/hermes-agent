@@ -364,6 +364,79 @@ function qrReset(state) {
     qrSession.abort = null;
 }
 
+// Shared chrome for every page this bridge serves. Inlined rather than served
+// as an asset: there is no static pipeline here, and these pages must render
+// on a phone with nothing installed and no network beyond this host.
+const QR_PAGE_CSS = `
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #f5f5f7; color: #1d1d1f; padding: 20px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .card { background: #2c2c2e !important; }
+    code { background: #1c1c1e !important; }
+  }
+  .card { background: #fff; border-radius: 16px; padding: 32px;
+          box-shadow: 0 2px 18px rgba(0,0,0,.12); text-align: center;
+          max-width: 380px; width: 100%; }
+  h1 { font-size: 19px; margin: 0 0 6px; font-weight: 600; }
+  p.sub { font-size: 13.5px; opacity: .65; margin: 0 0 22px; line-height: 1.5; }
+  .icon { font-size: 44px; line-height: 1; margin-bottom: 14px; }
+  code { display: block; background: #f0f0f2; border-radius: 8px;
+         padding: 11px 13px; font-size: 12.5px; text-align: left;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         overflow-x: auto; white-space: pre; margin: 4px 0 0; }
+  .hint { font-size: 12.5px; opacity: .55; margin-top: 20px; line-height: 1.55; }
+  .label { font-size: 12px; opacity: .5; text-transform: uppercase;
+           letter-spacing: .05em; margin: 18px 0 6px; text-align: left; }
+`;
+
+// Terminal-state notice: expired link, already-used link, or a bad token.
+// Each says what happened and what to do about it — a bare 403 leaves the
+// operator guessing whether they mistyped or simply waited too long.
+function qrNoticeHtml(reason) {
+    const views = {
+        expired: {
+            icon: "⏳",
+            title: "Mã QR đã hết hạn",
+            sub: "Link đăng nhập chỉ có hiệu lực trong 10 phút. "
+               + "Mã cũ đã ngừng hoạt động — hãy tạo mã mới.",
+        },
+        used: {
+            icon: "✓",
+            title: "Đã đăng nhập xong",
+            sub: "Link này đã được dùng để đăng nhập thành công và không còn "
+               + "hiệu lực. Bot đang chạy bình thường, anh/chị có thể đóng trang này.",
+        },
+        invalid: {
+            icon: "🔒",
+            title: "Link không hợp lệ",
+            sub: "Mã bảo mật trong link không đúng. Có thể link bị sao chép "
+               + "thiếu — hãy kiểm tra lại, hoặc tạo link mới.",
+        },
+    };
+    const v = views[reason] || views.invalid;
+    const showCmd = reason !== "used";
+
+    return `<!doctype html>
+<html lang="vi"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${v.title}</title>
+<style>${QR_PAGE_CSS}</style></head>
+<body><div class="card">
+  <div class="icon">${v.icon}</div>
+  <h1>${v.title}</h1>
+  <p class="sub">${v.sub}</p>
+  ${showCmd ? `<div class="label">Tạo link mới trên máy chủ</div>
+  <code>node index.js --qr-web</code>
+  <p class="hint">Chạy lệnh trên trong thư mục <code style="display:inline;padding:2px 5px">bridge/</code>
+     của plugin Zalo. Terminal sẽ in ra một link mới.</p>` : ""}
+</div></body></html>`;
+}
+
 // Served as one self-contained page: the bridge has no static asset pipeline
 // and the page must work on a phone with nothing else installed.
 function qrPageHtml(token) {
@@ -372,51 +445,42 @@ function qrPageHtml(token) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Đăng nhập Zalo Bot</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         margin: 0; min-height: 100vh; display: grid; place-items: center;
-         background: #f5f5f7; color: #1d1d1f; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #1c1c1e; color: #f5f5f7; }
-    .card { background: #2c2c2e !important; }
-  }
-  .card { background: #fff; border-radius: 16px; padding: 28px 32px;
-          box-shadow: 0 2px 18px rgba(0,0,0,.12); text-align: center;
-          max-width: 360px; width: calc(100% - 32px); }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  p.sub { font-size: 13px; opacity: .65; margin: 0 0 20px; }
-  #qr { width: 260px; height: 260px; object-fit: contain; border-radius: 8px;
+<style>${QR_PAGE_CSS}
+  #qr { width: 260px; height: 260px; object-fit: contain; border-radius: 10px;
         background: #fff; display: block; margin: 0 auto; }
-  #status { margin-top: 18px; font-size: 14px; min-height: 20px; }
+  #status { margin-top: 18px; font-size: 14px; min-height: 20px; line-height: 1.5; }
   .ok { color: #1a8f3c; } .warn { color: #b35c00; } .err { color: #c0362c; }
   .spin { display: inline-block; width: 14px; height: 14px; margin-right: 6px;
           border: 2px solid currentColor; border-right-color: transparent;
           border-radius: 50%; animation: r .8s linear infinite;
           vertical-align: -2px; }
   @keyframes r { to { transform: rotate(360deg) } }
-  button { margin-top: 14px; padding: 9px 20px; font-size: 14px;
-           border: 0; border-radius: 8px; background: #0068ff; color: #fff;
+  button { margin-top: 16px; padding: 10px 22px; font-size: 14px; font-weight: 500;
+           border: 0; border-radius: 9px; background: #0068ff; color: #fff;
            cursor: pointer; }
+  button:active { opacity: .8; }
 </style></head>
 <body><div class="card">
   <h1>Đăng nhập Zalo cho bot</h1>
   <p class="sub">Mở Zalo trên điện thoại → Thêm → Mã QR → quét mã bên dưới</p>
   <img id="qr" alt="Mã QR đăng nhập">
   <div id="status"><span class="spin"></span>Đang tạo mã…</div>
-  <button id="retry" style="display:none" onclick="location.reload()">Tạo mã mới</button>
+  <div id="again" style="display:none">
+    <div class="label">Tạo link mới trên máy chủ</div>
+    <code>node index.js --qr-web</code>
+  </div>
 </div>
 <script>
 const TOKEN = ${JSON.stringify(token)};
 const qr = document.getElementById('qr');
 const st = document.getElementById('status');
-const rt = document.getElementById('retry');
+const again = document.getElementById('again');
 function show(html, cls) { st.innerHTML = html; st.className = cls || ''; }
 async function poll() {
   let r;
   try {
     r = await (await fetch('/qr/status?t=' + encodeURIComponent(TOKEN))).json();
-  } catch { show('Mất kết nối tới máy chủ.', 'err'); rt.style.display = 'inline-block'; return; }
+  } catch { show('Mất kết nối tới máy chủ.', 'err'); again.style.display = 'block'; return; }
   if (r.image && qr.src !== r.image) qr.src = r.image;
   switch (r.state) {
     case 'waiting':
@@ -429,13 +493,13 @@ async function poll() {
       return;
     case 'expired':
       qr.style.opacity = .25;
-      show('Mã đã hết hạn.', 'warn'); rt.style.display = 'inline-block'; return;
+      show('Mã đã hết hạn.', 'warn'); again.style.display = 'block'; return;
     case 'declined':
-      show('Bạn đã từ chối trên điện thoại.', 'warn'); rt.style.display = 'inline-block'; return;
+      show('Bạn đã từ chối trên điện thoại.', 'warn'); again.style.display = 'block'; return;
     case 'error':
-      show('Lỗi: ' + (r.error || 'không rõ'), 'err'); rt.style.display = 'inline-block'; return;
+      show('Lỗi: ' + (r.error || 'không rõ'), 'err'); again.style.display = 'block'; return;
     case 'idle':
-      show('Phiên không còn hiệu lực.', 'warn'); rt.style.display = 'inline-block'; return;
+      show('Phiên không còn hiệu lực.', 'warn'); again.style.display = 'block'; return;
   }
   setTimeout(poll, 1200);
 }
@@ -576,9 +640,29 @@ async function handleRequest(req, res) {
     if (url.pathname === "/qr") {
         const token = url.searchParams.get("t") || "";
         if (!qrSessionValid(token)) {
-            res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
-            res.end("Link không hợp lệ hoặc đã hết hạn.\n"
-                  + "Chạy lại: node index.js --qr-web");
+            // Distinguish the three ways in, because the fix differs: an
+            // expired or already-used link needs a new one; a wrong token
+            // means the URL was mistyped or tampered with.
+            let reason = "invalid";
+            if (qrSession.state === "done") {
+                reason = "used";
+            } else if (
+                qrSession.token &&
+                token === qrSession.token &&
+                Date.now() >= qrSession.expiresAt
+            ) {
+                reason = "expired";
+            } else if (!qrSession.active && qrSession.state === "expired") {
+                reason = "expired";
+            }
+            res.writeHead(reason === "used" ? 200 : 403, {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy":
+                    "default-src 'none'; style-src 'unsafe-inline'",
+                "Referrer-Policy": "no-referrer",
+            });
+            res.end(qrNoticeHtml(reason));
             return;
         }
         res.writeHead(200, {
