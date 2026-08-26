@@ -152,6 +152,28 @@ The page refreshes the QR when Zalo rotates it and shows live status —
 waiting → scanned (with the scanner's name) → done. On success the session is
 written and the bridge takes over the new login **without a restart**.
 
+#### Re-login while the bot is running
+
+The cookie dies every few days, and the bridge is usually still holding port
+8647 when it does. Run the same command — it detects the occupied port, asks
+the running bridge to open the QR session, and prints the link:
+
+```
+──────────────────────────────────────────────────────────
+  Bridge đang chạy (đã đăng nhập). Quét link này để ĐỔI sang tài khoản khác:
+
+  http://192.168.1.50:8647/qr?t=…
+──────────────────────────────────────────────────────────
+
+  Tiến trình bridge đang chạy sẽ nhận đăng nhập mới — không cần khởi động lại.
+```
+
+The live process installs the new login in place: no restart, no dropped
+session. A QR session already open is reused rather than replaced.
+
+If the port belongs to something else entirely, it says so and suggests
+`ss -tlnp` plus a different `PORT` instead of failing with `EADDRINUSE`.
+
 **Anyone who opens that link and scans takes over the bot's Zalo account.**
 Hence:
 

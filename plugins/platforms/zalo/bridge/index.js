@@ -678,6 +678,32 @@ async function handleRequest(req, res) {
         return;
     }
 
+    // Re-login against a bridge that is already serving. The common case is a
+    // running bot whose cookie died: the port is taken, so a second process
+    // cannot open a QR session itself — it asks this one to.
+    if (req.method === "POST" && url.pathname === "/qr/start") {
+        if (!authorized(req)) {
+            sendJson(res, 401, { error: "bad bridge token" });
+            return;
+        }
+        if (qrSession.active && Date.now() < qrSession.expiresAt) {
+            sendJson(res, 200, {
+                token: qrSession.token,
+                expires_at: qrSession.expiresAt,
+                reused: true,
+            });
+            return;
+        }
+        const token = beginQrSession();
+        startQrLogin();
+        sendJson(res, 200, {
+            token,
+            expires_at: qrSession.expiresAt,
+            reused: false,
+        });
+        return;
+    }
+
     if (url.pathname === "/qr/status") {
         const token = url.searchParams.get("t") || "";
         // A finished session burns its token, so the page must still be able
@@ -880,22 +906,120 @@ function lanAddress() {
     return "127.0.0.1";
 }
 
-function announceQrLink() {
+// Arm a fresh QR session and return its token. Split from announceQrLink so
+// /qr/start can arm one inside an already-running bridge.
+function beginQrSession() {
     qrSession.token = crypto.randomBytes(24).toString("hex");
     qrSession.expiresAt = Date.now() + QR_TTL_MS;
     qrSession.active = true;
     qrSession.state = "waiting";
     qrSession.image = "";
     qrSession.error = "";
+    qrSession.userName = "";
+    return qrSession.token;
+}
 
+function qrLink(token) {
     const host = process.env.ZALO_QR_HOST || lanAddress();
-    const link = `http://${host}:${PORT}/qr?t=${qrSession.token}`;
+    return `http://${host}:${PORT}/qr?t=${token}`;
+}
+
+function printQrLink(token, note) {
+    const link = qrLink(token);
     const line = "─".repeat(Math.min(link.length + 4, 78));
     console.log(
-        `\n${line}\n  Mở link này để quét QR (hết hạn sau ${QR_TTL_MS / 60000} phút):\n\n`
+        `\n${line}\n  ${note || `Mở link này để quét QR (hết hạn sau ${QR_TTL_MS / 60000} phút):`}\n\n`
         + `  ${link}\n\n${line}\n`
     );
+}
+
+function announceQrLink() {
+    printQrLink(beginQrSession());
     startQrLogin();
+}
+
+// Talk to a bridge that already owns the port, over loopback.
+function bridgeRequest(method, urlPath) {
+    return new Promise((resolve, reject) => {
+        const req = http.request(
+            {
+                host: "127.0.0.1",
+                port: PORT,
+                path: urlPath,
+                method,
+                headers: { "X-Bridge-Token": TOKEN, "Content-Length": 0 },
+                timeout: 15000,
+            },
+            (res) => {
+                let body = "";
+                res.on("data", (c) => (body += c));
+                res.on("end", () => {
+                    try {
+                        resolve({ status: res.statusCode, json: JSON.parse(body || "{}") });
+                    } catch {
+                        resolve({ status: res.statusCode, json: {} });
+                    }
+                });
+            }
+        );
+        req.on("timeout", () => { req.destroy(new Error("timeout")); });
+        req.on("error", reject);
+        req.end();
+    });
+}
+
+async function requestQrFromRunningBridge() {
+    let health;
+    try {
+        health = await bridgeRequest("GET", "/health");
+    } catch (err) {
+        console.error(
+            `\n  Cổng ${PORT} đang bị chiếm, nhưng tiến trình đó không phải Zalo bridge.\n`
+            + `  Kiểm tra:  ss -tlnp | grep ${PORT}\n`
+            + `  Hoặc chạy cổng khác:  PORT=8648 node index.js --qr-web\n`
+        );
+        process.exit(6);
+    }
+
+    let started;
+    try {
+        started = await bridgeRequest("POST", "/qr/start");
+    } catch (err) {
+        console.error("  Không gọi được bridge đang chạy:", (err && err.message) || err);
+        process.exit(6);
+    }
+
+    if (started.status === 401) {
+        // Both sides derive the token from the session file when
+        // ZALO_BRIDGE_TOKEN is unset, and the bridge rewrites that file as it
+        // rotates cookies — so the two hashes drift apart.
+        console.error(
+            `\n  Bridge đang chạy từ chối token.\n\n`
+            + `  Đặt ZALO_BRIDGE_TOKEN giống nhau cho cả hai, rồi khởi động lại bridge:\n`
+            + `    ZALO_BRIDGE_TOKEN=$(openssl rand -hex 32)   # ghi vào .env\n\n`
+            + `  Hoặc dừng bridge rồi chạy lại lệnh này.\n`
+        );
+        process.exit(7);
+    }
+    if (started.status !== 200 || !started.json.token) {
+        console.error(`  Bridge trả về HTTP ${started.status}. Không mở được phiên QR.`);
+        process.exit(8);
+    }
+
+    const ready = health.json && health.json.ready;
+    printQrLink(
+        started.json.token,
+        started.json.reused
+            ? "Đã có phiên QR đang mở — dùng link này:"
+            : ready
+                ? "Bridge đang chạy (đã đăng nhập). Quét link này để ĐỔI sang tài khoản khác:"
+                : "Bridge đang chạy nhưng chưa đăng nhập. Quét link này:"
+    );
+    console.log(
+        "  Tiến trình bridge đang chạy sẽ nhận đăng nhập mới — không cần khởi động lại.\n"
+        + "  Theo dõi trạng thái trên chính trang web đó.\n"
+    );
+    process.exit(0);
 }
 
 (async () => {
@@ -911,7 +1035,15 @@ function announceQrLink() {
             process.exit(2);
         }
         const server = http.createServer(handleRequest);
-        server.on("error", (err) => {
+        server.on("error", async (err) => {
+            if (err && err.code === "EADDRINUSE") {
+                // The usual re-login case: the bot is running and its cookie
+                // expired. That process owns the port, so ask IT to open the
+                // QR session — a second listener cannot, and killing the
+                // running bridge would drop the live session for nothing.
+                await requestQrFromRunningBridge();
+                return;
+            }
             console.error("[zalo-bridge] server error:", err && err.message);
             process.exit(5);
         });
