@@ -1296,10 +1296,45 @@ class ZaloAdapter(BasePlatformAdapter):
             self._friend_miss.clear()
             logger.info("Zalo: cached %d friends", len(fresh))
 
+    async def _refresh_own_id(self) -> None:
+        """Re-read own_id from the bridge, in case the account changed.
+
+        ``--qr-web`` re-logins the RUNNING bridge into a different Zalo account
+        without a restart. The bridge then reports the new own_id, but this
+        adapter captured its copy once at connect and kept it — so
+        ``mentions_self`` compares an incoming mention against the *previous*
+        account's id, never matches, and every group message is filed as
+        ``ambient``. Direct messages keep working, which makes it look like the
+        bot is fine and merely ignoring the group.
+
+        Observed live: bridge on 699758145934526126, adapter still holding
+        638527951485115695 from a session ten hours older.
+        """
+        client = self._client
+        if not client:
+            return
+        try:
+            health = await client.health()
+        except Exception as exc:
+            logger.debug("Zalo: own_id refresh failed: %s", exc)
+            return
+        fresh = str(health.get("own_id") or "")
+        if not fresh or fresh == self._own_id:
+            return
+        logger.warning(
+            "Zalo: bridge account changed (own_id %s -> %s); group "
+            "mention-gating now follows the new account. Access lists are "
+            "keyed by uid and a uid is relative to the observing account, so "
+            "allowlist.json almost certainly needs re-granting.",
+            self._own_id or "(empty)", fresh,
+        )
+        self._own_id = fresh
+
     async def _friend_refresh_loop(self) -> None:
         while True:
             try:
                 await asyncio.sleep(FRIEND_REFRESH_SECONDS)
+                await self._refresh_own_id()
                 await self._refresh_friends()
             except asyncio.CancelledError:
                 raise
