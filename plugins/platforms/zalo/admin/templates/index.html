@@ -123,10 +123,13 @@
       <button class="btn" id="refresh-users">Tải lại danh bạ</button>
     </div>
     <div class="note" id="modenote"></div>
+    <div class="note">Danh sách gồm <b>cả người chưa kết bạn</b> nhưng đã từng
+      nhắn cho bot — đó thường chính là người cần cấp quyền. Ai chưa có quyền
+      mà đã nhắn thì được xếp lên đầu.</div>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Tên</th><th>Số điện thoại</th><th>Trạng thái</th><th></th></tr></thead>
-        <tbody id="tb-users"><tr><td colspan="4">đang tải…</td></tr></tbody>
+        <thead><tr><th>Tên</th><th>Nguồn</th><th>Đã nhắn</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="tb-users"><tr><td colspan="5">đang tải…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -246,7 +249,7 @@ async function loadStatus(){
 // ── directory ─────────────────────────────────────────
 async function loadDir(kind){
   const tb = kind === 'friends' ? $('#tb-users') : $('#tb-groups');
-  const cols = kind === 'friends' ? 4 : 4;
+  const cols = kind === 'friends' ? 5 : 4;
   tb.innerHTML = `<tr><td colspan="${cols}">đang tải…</td></tr>`;
   try{
     const d = await api('/api/directory?kind=' + kind);
@@ -266,15 +269,35 @@ function render(kind){
   const list  = rows.filter(r => !q ||
       r.name.toLowerCase().includes(q) || r.extra.toLowerCase().includes(q));
 
-  if(!list.length){ tb.innerHTML = '<tr><td colspan="4">Không có mục nào khớp.</td></tr>'; return; }
+  if(!list.length){ tb.innerHTML = `<tr><td colspan="${kind==='friends'?5:4}">Không có mục nào khớp.</td></tr>`; return; }
 
-  tb.innerHTML = list.map(r=>{
-    const acts = kind === 'friends' ? friendActions(r) : groupActions(r);
-    return `<tr>
+  if(kind === 'groups'){
+    tb.innerHTML = list.map(r=>`<tr>
       <td>${esc(r.name)}<div class="mono">${esc(r.id)}</div></td>
       <td class="mono">${esc(r.extra) || '—'}</td>
       <td><span class="state ${r.state}">${esc(r.label)}</span></td>
-      <td class="act">${acts}</td></tr>`;
+      <td class="act">${groupActions(r)}</td></tr>`).join('');
+    return;
+  }
+  const SRC = {
+    friend: ['bạn bè', ''],
+    seen:   ['đã nhắn', ''],
+    list:   ['trong danh sách', ''],
+    stale:  ['uid cũ', 'uid này không phân giải được bằng tài khoản bot hiện tại — di sản của tài khoản trước, nên gỡ'],
+  };
+  tb.innerHTML = list.map(r=>{
+    const [srcLabel, srcHint] = SRC[r.source] || ['', ''];
+    const hist = r.msg_count
+      ? `${r.msg_count} tin<div class="mono">${esc(r.last_seen || '')}</div>`
+      : '<span class="mono">—</span>';
+    return `<tr>
+      <td>${esc(r.name)}<div class="mono">${esc(r.id)}</div>
+        ${r.extra ? `<div class="mono">${esc(r.extra)}</div>` : ''}</td>
+      <td><span class="state ${r.source === 'stale' ? 'deny' : 'none'}"
+             ${srcHint ? `title="${esc(srcHint)}"` : ''}>${esc(srcLabel)}</span></td>
+      <td>${hist}</td>
+      <td><span class="state ${r.state}">${esc(r.label)}</span></td>
+      <td class="act">${friendActions(r)}</td></tr>`;
   }).join('');
 }
 

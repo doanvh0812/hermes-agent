@@ -227,6 +227,70 @@ def _entry_ids(st: AllowlistStore, section: str, bucket: str) -> set:
     return {str(e.get("id") if isinstance(e, dict) else e) for e in st.entries(section, bucket)}
 
 
+def audit_senders() -> Dict[str, Dict[str, Any]]:
+    """Everyone who has ever messaged the bot, from audit.jsonl.
+
+    The friend list alone is not enough to administer access: the people who
+    most need granting are precisely the ones who messaged and were refused,
+    and a refused stranger is by definition not a friend. audit.jsonl records
+    the sender uid on every inbound event, so it is the only complete roster
+    of "who has actually turned up".
+
+    It stores no display name, so names come from the bridge later.
+    """
+    path = hermes_home() / "zalo" / "audit.jsonl"
+    seen: Dict[str, Dict[str, Any]] = {}
+    if not path.is_file():
+        return seen
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("dir") != "in":
+                continue
+            uid = str(d.get("sender") or "")
+            if not uid:
+                continue
+            rec = seen.setdefault(uid, {"count": 0, "last": "", "last_text": ""})
+            rec["count"] += 1
+            ts = str(d.get("ts") or "")
+            if ts > rec["last"]:
+                rec["last"] = ts
+                rec["last_text"] = str(d.get("text") or "")[:60]
+    return seen
+
+
+# Zalo throttles directory lookups and the bridge surfaces a throttle as a
+# plain 500, so resolved names are cached for the life of the process and the
+# number of lookups per request is capped.
+_name_cache: Dict[str, str] = {}
+_NAME_LOOKUPS_PER_REQUEST = 12
+
+
+async def resolve_name(uid: str, budget: List[int]) -> str:
+    """Best-effort display name for a uid the friend list does not cover.
+
+    An empty result is meaningful, not merely missing: a uid minted under a
+    PREVIOUS bot account cannot be resolved by the current one, because a Zalo
+    uid is relative to the account observing it. Those entries are dead weight
+    in allowlist.json and the UI labels them so they can be cleared out.
+    """
+    if uid in _name_cache:
+        return _name_cache[uid]
+    if budget[0] <= 0:
+        return ""
+    budget[0] -= 1
+    ok, data = await bridge(f"/user-info?id={uid}")
+    name = str((data or {}).get("name") or "") if ok and isinstance(data, dict) else ""
+    _name_cache[uid] = name
+    return name
+
+
 def _norm_people(raw: Any) -> List[Dict[str, str]]:
     """Flatten the bridge's friend/group payload into {id, name, extra}."""
     items = raw if isinstance(raw, list) else (
@@ -368,8 +432,53 @@ async def api_directory(request: Request, kind: str = "friends"):
     groups = _entry_ids(st, "groups", "allow")
     mode = st.mode
 
+    people = _norm_people(raw)
+
+    if kind == "friends":
+        # Three sources, not one. The friend list alone hides exactly the
+        # people who need attention: someone refused at the gate is by
+        # definition not a friend, so they never appeared here and could not
+        # be granted from this screen at all.
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for p in people:
+            by_id[p["id"]] = {**p, "source": "friend"}
+
+        stored_names = {
+            str(e.get("id")): str(e.get("name") or "")
+            for section, bucket in (("users", "allow"), ("users", "deny"))
+            for e in st.entries(section, bucket)
+            if isinstance(e, dict) and e.get("id")
+        }
+        stored_names.update({
+            a: st.admin_name(a) or "" for a in admins
+        })
+
+        seen = audit_senders()
+        budget = [_NAME_LOOKUPS_PER_REQUEST]
+        for uid in list(seen) + [u for u in stored_names if u not in seen]:
+            if uid in by_id:
+                by_id[uid]["source"] = "friend"
+                continue
+            name = stored_names.get(uid) or await resolve_name(uid, budget)
+            by_id[uid] = {
+                "id": uid,
+                "name": name or uid,
+                "extra": "",
+                # No name from any source means the uid cannot be resolved by
+                # the CURRENT bot account — almost always a leftover from a
+                # previous account, since a uid is relative to the observer.
+                "source": "stale" if not name else ("seen" if uid in seen else "list"),
+            }
+        for uid, info in seen.items():
+            row = by_id.get(uid)
+            if row is not None:
+                row["last_seen"] = str(info.get("last") or "")[:19].replace("T", " ")
+                row["msg_count"] = info.get("count", 0)
+                row["last_text"] = info.get("last_text", "")
+        people = list(by_id.values())
+
     rows = []
-    for p in _norm_people(raw):
+    for p in people:
         if kind == "friends":
             if p["id"] in admins:
                 state, label = "admin", "quản trị"
@@ -377,7 +486,7 @@ async def api_directory(request: Request, kind: str = "friends"):
                 state, label = "deny", "đã chặn"
             elif p["id"] in allow:
                 state, label = "allow", "được dùng"
-            elif mode == "friends":
+            elif mode == "friends" and p.get("source") == "friend":
                 state, label = "friend", "được dùng (bạn bè)"
             else:
                 state, label = "none", "chưa cấp"
@@ -385,6 +494,16 @@ async def api_directory(request: Request, kind: str = "friends"):
             approved = p["id"] in groups
             state, label = ("allow", "đã duyệt") if approved else ("none", "chưa duyệt")
         rows.append({**p, "state": state, "label": label})
+
+    # Anyone who has messaged and has no access yet is what this screen exists
+    # for, so sort them to the top instead of leaving them under the friends.
+    if kind == "friends":
+        order = {"none": 0, "deny": 1, "allow": 2, "friend": 3, "admin": 4}
+        rows.sort(key=lambda r: (
+            order.get(r["state"], 9),
+            -int(r.get("msg_count") or 0),
+            r["name"].lower(),
+        ))
     return {"rows": rows, "mode": mode}
 
 
