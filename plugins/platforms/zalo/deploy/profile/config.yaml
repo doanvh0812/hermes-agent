@@ -50,10 +50,18 @@ mcp_servers:
       ODOO_PASSWORD: "LITERAL-API-KEY"
       ODOO_TRANSPORT: "xmlrpc"          # json2 for Odoo 19+
 
-      # 7 of 41 tools. Allowlist, so tools added upstream stay off.
-      ODOO_MCP_TOOLS_INCLUDE: "search_records,read_record,aggregate_records,get_model_fields,build_domain,receivable_payable_aging,accounting_health_summary"
+      # 7 read tools + execute_method. Allowlist, so tools added upstream stay off.
+      ODOO_MCP_TOOLS_INCLUDE: "search_records,read_record,aggregate_records,get_model_fields,build_domain,receivable_payable_aging,accounting_health_summary,execute_method"
       ODOO_MCP_ALLOW_UNKNOWN_METHODS: "0"
       # ODOO_MCP_ENABLE_WRITES intentionally unset.
+      #
+      # The ONE write the agent may perform. execute_method blocks
+      # create/write/unlink outright and refuses side-effect methods unless
+      # they are named here — so the write surface is exactly this method,
+      # which only files a pending receipt (vni_invoice's
+      # vni.transfer.receipt.record_transfer_receipt). ENABLE_WRITES stays
+      # unset; approving payments stays out of the agent's reach.
+      ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS: "vni.transfer.receipt.record_transfer_receipt"
 
       ODOO_MCP_FIELD_POLICY_FILE: "/home/USER/.hermes/odoo-mcp/field_policy.json"
       ODOO_MCP_INSTRUCTIONS_FILE: "/home/USER/.hermes/odoo-mcp/instructions.txt"

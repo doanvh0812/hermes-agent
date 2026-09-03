@@ -49,6 +49,8 @@
       "res.partner.bank": { "allow": ["bank_id"] },
       "account.payment.method": { "allow": ["name"] },
 
+      "vni.transfer.receipt": { "allow": ["state"] },
+
       "res.partner": {
         "deny": [
           "vat", "company_registry", "bank_ids", "credit_limit",
