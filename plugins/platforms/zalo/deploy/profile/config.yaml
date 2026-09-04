@@ -24,12 +24,18 @@ terminal:
 
 # toolsets.enabled: false does NOT disable anything — Hermes reads
 # platform_toolsets instead (verified: a terminal tool kept running under it).
+# An MCP server is listed by the bare key it has under mcp_servers: below —
+# `odoo`. A decorated form (mcp-odoo, mcp_odoo) matches no server and is not a
+# toolset either, so the platform silently ends up with zero Odoo tools: the
+# server still starts and the gateway still logs it, but the agent can only
+# reply that it cannot look anything up.
 platform_toolsets:
-  zalo: [file, vision, clarify, session_search, memory, skills, mcp-odoo]
+  zalo: [file, vision, clarify, session_search, memory, skills, odoo]
 
-# Reverse-mapping re-adds look-alike toolsets once plugins load; name them here.
 agent:
-  disabled_toolsets: [kanban, odoo]
+  # Applied last, subtracting from what survived — so listing `odoo` here
+  # removes the MCP server enabled above. Only silence what you want gone.
+  disabled_toolsets: [kanban]
   # A lookup answers in a handful of tool calls. The default of 90 lets a
   # tool-loop (the model re-invoking the same search instead of answering)
   # burn minutes and tokens before anything stops it — the "⏳ Working — 3 min"
@@ -61,7 +67,7 @@ mcp_servers:
       # which only files a pending receipt (vni_invoice's
       # vni.transfer.receipt.record_transfer_receipt). ENABLE_WRITES stays
       # unset; approving payments stays out of the agent's reach.
-      ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS: "vni.transfer.receipt.record_transfer_receipt"
+      ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS: "vni.transfer.receipt.record_transfer_receipt,vni.transfer.receipt.find_billable_line,vni.transfer.receipt.create_invoice_and_payment"
 
       ODOO_MCP_FIELD_POLICY_FILE: "/home/USER/.hermes/odoo-mcp/field_policy.json"
       ODOO_MCP_INSTRUCTIONS_FILE: "/home/USER/.hermes/odoo-mcp/instructions.txt"

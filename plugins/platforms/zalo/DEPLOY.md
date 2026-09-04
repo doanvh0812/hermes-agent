@@ -96,6 +96,20 @@ journalctl --user -u hermes-gateway-zalo --since "5 min ago" \
 #    -> any hit means model/custom_providers or the API keys did not carry over
 ```
 
+`journalctl` carries almost nothing for this unit — only systemd's own
+start/stop lines. The gateway writes to the profile instead, and that is where
+to look when something is wrong:
+
+```bash
+tail -f "$HERMES_HOME/profiles/zalo-bot/logs/gateway.log"      # connection, turns
+tail -f "$HERMES_HOME/profiles/zalo-bot/logs/agent.log"        # tool_turns per turn
+tail -20 "$HERMES_HOME/profiles/zalo-bot/logs/mcp-stderr.log"  # the env the MCP got
+```
+
+`agent.log` is the one that answers "did the bot actually call a tool":
+`tool_turns=0` on a turn that should have queried Odoo means the tools never
+reached the agent — go back to the toolset check above.
+
 f. From Zalo, ask the bot to **create** something ("tạo 5 liên hệ test"). It
 must refuse. If it offers to do it, or starts describing how, step 5 is not
 in effect — stop and fix that before continuing.
@@ -732,9 +746,9 @@ terminal:
 plugins:
   enabled: []
 agent:
-  disabled_toolsets: [kanban, odoo]   # duplicates that reverse-mapping adds
+  disabled_toolsets: [kanban]   # NOT odoo — that would remove the MCP server
 platform_toolsets:
-  zalo: [file, vision, clarify, session_search, memory, skills, mcp-odoo]
+  zalo: [file, vision, clarify, session_search, memory, skills, odoo]
 mcp_servers:
   odoo:
     command: uvx
@@ -759,18 +773,28 @@ registry key, here `zalo`):
 | `session_search` | session_search | find earlier conversation |
 | `memory` | memory | keep context across turns |
 | `skills` | skills_list, skill_view | odoo-chat-support rules |
-| `mcp-odoo` | 7 Odoo read tools | business data |
+| `odoo` | Odoo read tools + `execute_method` | business data, receipt intake |
 
 Two naming/behaviour traps, both hit here:
 
-- The MCP server's toolset is named `mcp-<server>` — **`mcp-odoo`**, with a
-  hyphen. Writing `mcp_odoo` makes Hermes treat it as an unknown composite,
-  which triggers toolset expansion and pulls in tools you never listed.
-- Anything you list gets run through reverse-mapping once plugins load, which
-  can add look-alike toolsets (`kanban`, a duplicate `odoo`). Silence them
-  explicitly with `agent.disabled_toolsets`.
+- **List the MCP server by its bare name — `odoo`, the key under
+  `mcp_servers:`.** Not `mcp-odoo`, not `mcp_odoo`. `_get_platform_tools()`
+  intersects the platform's list against the enabled MCP server names, so a
+  decorated name matches no server; it is not a valid toolset either, and
+  `resolve_toolset()` returns nothing for it. The result is a platform with
+  **zero Odoo tools** and no error anywhere — the server still starts, the
+  gateway still logs it, and the agent simply answers that it cannot look
+  anything up.
+- **Do not put `odoo` in `agent.disabled_toolsets`.** That list is applied
+  last and subtracts from whatever survived, so it removes the MCP server you
+  just enabled. Only silence names you truly want gone (`kanban` here).
 
-Verify what actually resolves rather than trusting the YAML:
+These two hide each other: fix the name while `disabled_toolsets` still says
+`odoo` and the tools are still missing, which makes the name fix look wrong.
+
+Verify what actually resolves rather than trusting the YAML. Assert on the
+MCP server by name — a count alone passes happily with the Odoo tools absent,
+which is exactly how this shipped broken:
 
 ```bash
 cd "$HERMES_HOME/hermes-agent" && venv/bin/python - <<'EOF'
@@ -781,10 +805,21 @@ cfg = yaml.safe_load(open(os.environ["HERMES_HOME"] + "/profiles/zalo-bot/config
 from hermes_cli.tools_config import _get_platform_tools
 from toolsets import resolve_toolset
 ts = sorted(_get_platform_tools(cfg, "zalo"))
+print("toolsets:", ts)
 tools = sorted({t for name in ts for t in resolve_toolset(name)})
-print(len(tools), "tools:", ", ".join(tools))
+print(len(tools), "native tools:", ", ".join(tools))
+assert "odoo" in ts, "Odoo MCP server not enabled for this platform!"
 assert "terminal" not in tools, "terminal leaked into the chat profile!"
+print("ok")
 EOF
+```
+
+`resolve_toolset()` knows nothing about MCP servers, so MCP tools never appear
+in that `tools` list — `odoo` showing up in `toolsets` is the check that
+matters. For the tools themselves, ask the running server:
+
+```bash
+grep ODOO_MCP_TOOLS_INCLUDE "$HERMES_HOME/profiles/zalo-bot/logs/mcp-stderr.log" | tail -1
 ```
 
 #### The profile's SOUL.md carries the full rules
