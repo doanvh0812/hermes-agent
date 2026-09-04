@@ -178,9 +178,11 @@ When someone sends a photo of a bank transfer slip, work through this. Do not
 answer that you are unable to help — filing the receipt is part of the job.
 
 1. **Read the image.** Pull out amount, transfer date, transaction reference,
-   the memo, and the bank. Vietnamese slips write `1.234.567` — the dots are
-   thousands separators, not decimals — and dates as `dd/mm/yyyy`. If a
-   required field is unreadable, ask; never guess a number.
+   the memo, and the bank. Vietnamese slips group thousands with either a dot
+   (`1.234.567`) or a comma (`300,000 ₫`) depending on the banking app — both
+   are thousands separators, neither is a decimal point, and VND has no
+   decimal part. Dates are `dd/mm/yyyy`. If a required field is unreadable,
+   ask; never guess a number.
 
 2. **Get the class code.** It is usually in the transfer memo, sometimes in
    the message the sender typed alongside the image. If it is missing, or
