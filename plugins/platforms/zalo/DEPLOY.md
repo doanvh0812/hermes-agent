@@ -127,6 +127,50 @@ Under `$HERMES_HOME/zalo/`:
 
 Back these up before any migration. `.health-state` is disposable.
 
+### State that must NOT survive a rules change
+
+Conversation history is the opposite case: after editing `SOUL.snippet.md`,
+the skill, or `instructions.txt`, the running conversations have to go, or the
+edit does nothing visible.
+
+The reason is that a model follows the position it already took in the
+transcript. A bot that told a user three times "this channel is read-only"
+keeps saying it after you grant the write, because those turns are replayed to
+it every time. Four gateway restarts in a row can look like the fix failed
+when the only thing wrong is the history.
+
+History lives in **`$HERMES_HOME/profiles/<name>/state.db`** (SQLite,
+`sessions` + `messages`). `sessions/sessions.json` next to it holds only
+metadata — deleting that alone changes nothing, and the gateway rewrites it
+from memory on the next turn.
+
+Stop the gateway first. Deleting rows under a running gateway is a no-op: it
+holds sessions in memory and writes them back:
+
+```bash
+systemctl --user stop hermes-gateway-zalo
+python3 - <<'EOF'
+import os, sqlite3
+db = os.path.expanduser("~/.hermes/profiles/zalo-bot/state.db")
+c = sqlite3.connect(db)
+ids = [r[0] for r in c.execute(
+    "SELECT id FROM sessions WHERE session_key LIKE 'agent:main:zalo:%'")]
+for sid in ids:
+    c.execute("DELETE FROM messages WHERE session_id=?", (sid,))
+c.execute("DELETE FROM sessions WHERE session_key LIKE 'agent:main:zalo:%'")
+c.commit()
+print("cleared", len(ids), "sessions;",
+      c.execute("SELECT COUNT(*) FROM messages").fetchone()[0], "messages left")
+EOF
+systemctl --user start hermes-gateway-zalo
+```
+
+(`sqlite3` the CLI is not installed on every host — Fedora 44 ships without
+it — but `python3` and its bundled `sqlite3` module always are.)
+
+Confirm the new turn reports a **new session id** in `logs/agent.log`. The old
+id reappearing means the wipe did not take.
+
 ## Contents
 
 | Path | Role |
@@ -399,6 +443,29 @@ systemctl --user restart hermes-gateway
 The adapter attaches to a running bridge when one is healthy, and spawns
 one otherwise. The bridge outlives the gateway on purpose — Zalo kicks
 accounts that re-login frequently.
+
+**Whose child is the bridge?** A bridge the gateway spawned dies with the
+gateway, which is fine — the next start spawns another. A bridge you started
+by hand (`node index.js --qr-web` for a QR re-login, say) belongs to *that*
+shell, and it dies when the shell does: closing the terminal, ending the SSH
+session, or quitting the tool you ran it from. The gateway then keeps running
+under systemd with no bridge, and Zalo goes quiet until the adapter's next
+reconnect spawns a replacement.
+
+Check the ancestry before trusting a bridge to stay up:
+
+```bash
+pstree -ps "$(pgrep -f 'node index.js' | head -1)" | head -1
+```
+
+Anything but `systemd(1)` → `systemd(<uid>)` → the gateway means the bridge is
+tied to a session. To hand it back to the gateway, kill it and let the adapter
+spawn its own on the next reconnect — the re-login is silent because
+`session.json` is already on disk, so this costs nothing with Zalo:
+
+```bash
+kill "$(pgrep -f 'node index.js' | head -1)"
+```
 
 ---
 
