@@ -9,7 +9,7 @@ description: >
 version: 1.0.0
 author: doanvh0812
 license: MIT
-platforms: [linux, macos]
+platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Odoo, ERP, Chat, Support, ReadOnly, Zalo, PromptInjection]
