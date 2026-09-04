@@ -676,10 +676,11 @@ neither substitutes for backend authorization.
 | `deploy/profile/build-soul.sh` | run once | Assembles snippet + skill into the profile's `SOUL.md` |
 | `deploy/profile/hermes-gateway-zalo.service` | `~/.config/systemd/user/` | Gateway bound to that profile |
 | `deploy/skills/odoo/` | `$HERMES_HOME/skills/odoo/` | `odoo-chat-support` skill — full operating rules |
-| `deploy/odoo-mcp/field_policy.json` | `$HERMES_HOME/odoo-mcp/` | Field-level ACL enforced on every read path |
+| `deploy/odoo-mcp/field_policy.json` | `$HERMES_HOME/odoo-mcp/` | Field-level ACL — enforced by the read tools, **not** by `execute_method` |
 | `deploy/odoo-mcp/instructions.txt` | `$HERMES_HOME/odoo-mcp/` | Server-level MCP instructions |
 | `deploy/zalo-health.sh` | anywhere on PATH | Bridge health + token-drift check |
 | `deploy/logrotate.conf` | user cron | Log rotation |
+| `deploy/patches/fix-execute-method-field-acl.py` | run after enabling `execute_method` | Makes `execute_method` obey the allowlist so it cannot bypass the field ACL |
 
 ```bash
 cp -r deploy/skills/odoo     "$HERMES_HOME/skills/"
@@ -993,7 +994,10 @@ Model instructions are advisory. The real boundary is:
    above it fails.
 2. **The tool surface.** `ODOO_MCP_TOOLS_INCLUDE` (allowlist, not exclude —
    fail closed) and `ODOO_MCP_ENABLE_WRITES` left unset.
-3. **Field ACL.** `field_policy.json`, enforced server-side on every read.
+3. **Field ACL.** `field_policy.json`, enforced server-side by the read
+   tools — `search_records`, `read_record`, `aggregate_records`. Read that
+   list literally: it is **not** enforced by `execute_method`, which the
+   transfer-receipt flow requires. See the warning below.
 4. **The adapter gate.** Who may talk to the agent at all.
 
 Note the gap this deployment does not close: with one shared Odoo account,
@@ -1001,6 +1005,52 @@ every approved user sees the same data. That is acceptable for an internal
 staff bot and **not** acceptable for a bot serving external customers — that
 would need per-user identity mapping, with `partner_id` resolved server-side
 from the sender and never accepted as a model-supplied argument.
+
+#### Enabling `execute_method` punches a hole in the field ACL
+
+The field policy lives in odoo-mcp's `tools_read.py` — `redact_records`,
+`redact_record`, `check_aggregate`. `execute_method` lives in
+`tools_write.py`, which does not import `field_policy` at all, and
+`odoo_client.py` does no redaction either. Whatever `execute_method` returns
+comes back raw.
+
+That would be harmless if `execute_method` only reached the allow-listed
+receipt methods. It does not. Its gate is name-based:
+
+```python
+safety = classify_method_safety(method)                       # by NAME
+review_required = safety["safety"] in {"side_effect", "unknown"}
+```
+
+and `classify_method_safety` calls a method `read_only` — needing **no**
+allowlist entry — when its name is `search`, `search_count`, `search_read`,
+`read`, `fields_get`, `name_get`, `name_search`, `context_get`, or merely
+starts with `get_`. Only `create`/`write`/`unlink` are refused outright. So
+
+```
+execute_method(model="hr.employee", method="search_read",
+               kwargs={"fields": ["name", "mobile_phone"]})
+```
+
+returns every field on any model the credential can see, walking straight
+past the `allow`/`deny` lists. Where that credential is an administrator,
+`field_policy.json` is the only barrier there is.
+
+Run `deploy/patches/fix-execute-method-field-acl.py` when you enable
+`execute_method`. It requires the exact `model.method` allowlist for every
+method reaching the tool, so the surface really is the allow-listed methods
+and nothing else. Reads keep working — they go through the policy-aware
+tools. Reapply after `uv tool upgrade odoo-mcp`.
+
+Verify by behaviour, not by reading the config — call the MCP server over
+stdio and check all three:
+
+- an allow-listed receipt method still succeeds;
+- `execute_method` with `model="hr.employee", method="search_read"` is
+  refused;
+- `search_records` on the same fields comes back with `redacted_fields`
+  naming the field the policy hides. That third one is what proves the
+  second was actually leaking something.
 
 ### MCP server configuration
 

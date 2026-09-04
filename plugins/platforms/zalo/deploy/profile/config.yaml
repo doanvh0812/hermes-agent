@@ -61,12 +61,21 @@ mcp_servers:
       ODOO_MCP_ALLOW_UNKNOWN_METHODS: "0"
       # ODOO_MCP_ENABLE_WRITES intentionally unset.
       #
-      # The ONE write the agent may perform. execute_method blocks
-      # create/write/unlink outright and refuses side-effect methods unless
-      # they are named here — so the write surface is exactly this method,
-      # which only files a pending receipt (vni_invoice's
-      # vni.transfer.receipt.record_transfer_receipt). ENABLE_WRITES stays
-      # unset; approving payments stays out of the agent's reach.
+      # The methods the agent may reach through execute_method. Three, not
+      # one: find_billable_line only reads, record_transfer_receipt files a
+      # pending receipt, but create_invoice_and_payment issues and POSTS an
+      # invoice and records its payment — real money in the books, with no
+      # approval step behind it. The skill and the SOUL guardrail both gate
+      # it on the sender's own confirmation; this line is what makes it
+      # reachable at all.
+      #
+      # execute_method blocks create/write/unlink outright and refuses
+      # side-effect methods unless named here. It does NOT refuse methods
+      # whose NAME looks read-only (search_read, read, get_*) — those reach
+      # any model and skip field_policy.json entirely, because the policy is
+      # enforced in tools_read.py and execute_method is not there. Run
+      # deploy/patches/fix-execute-method-field-acl.py to close that; see
+      # DEPLOY.md, "Enabling execute_method punches a hole in the field ACL".
       ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS: "vni.transfer.receipt.record_transfer_receipt,vni.transfer.receipt.find_billable_line,vni.transfer.receipt.create_invoice_and_payment"
 
       ODOO_MCP_FIELD_POLICY_FILE: "/home/USER/.hermes/odoo-mcp/field_policy.json"
