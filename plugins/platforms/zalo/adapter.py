@@ -397,6 +397,19 @@ def classify_inbound(msg: Dict[str, Any]) -> Tuple[MessageType, str, List[str], 
 
         blob = json.dumps(content_obj, ensure_ascii=False)
         urls = [u.rstrip(".,);") for u in _URL_RE.findall(blob)]
+
+        # A plain photo carries neither `parameters` nor a fileExt: the CDN
+        # link sits on href/thumb and inside params as rawUrl, leaving
+        # param_types empty and the message classified as text with its image
+        # dropped. Fall back to the extension in the URL path — query strings
+        # and fragments stripped first, or ".jpg?foo" never matches.
+        if not param_types:
+            for url in urls:
+                path = url.split("?", 1)[0].split("#", 1)[0]
+                _, dot, ext = path.rpartition(".")
+                if dot and 1 <= len(ext) <= 5 and ext.isalnum():
+                    param_types.append(ext.lower())
+
         mtype = MessageType.TEXT
         for needles, candidate in _PARAM_TYPE_MAP:
             if any(any(n in pt for n in needles) for pt in param_types):
@@ -418,7 +431,12 @@ def classify_inbound(msg: Dict[str, Any]) -> Tuple[MessageType, str, List[str], 
             MessageType.STICKER: "[sticker]",
             MessageType.DOCUMENT: "[tệp đính kèm]",
         }.get(mtype, "[tin nhắn]")
-        return mtype, label, media_urls, [mime_by_type[mtype]]
+        # mtype stays TEXT when no param type matched — and TEXT has no mime
+        # entry, so indexing here used to raise KeyError and take down the
+        # whole bridge-event handler, losing the message (attachments
+        # included) rather than degrading to a plain-text event.
+        mime = mime_by_type.get(mtype)
+        return mtype, label, media_urls, [mime] if mime else []
     return MessageType.TEXT, title or "[tin nhắn]", [], []
 
 
