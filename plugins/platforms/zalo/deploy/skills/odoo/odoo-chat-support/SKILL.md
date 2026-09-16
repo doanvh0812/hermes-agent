@@ -526,7 +526,8 @@ Examples of supported business questions:
 - Order status
 - Product information
 - Project status (dự án công việc — project.project)
-- Task status (công việc trong dự án — project.task)
+- Task status (công việc trong dự án — project.task) — departmental task
+  boards, who is assigned, what is finished, what is overdue
 
 The same rules apply even if the user does not explicitly mention "Odoo".
 
@@ -542,7 +543,19 @@ Examples:
 
 > "Công việc thiết kế giao diện xong chưa, ai phụ trách?"
 
+> "Phòng truyền thông tuần này làm được bao nhiêu việc?"
+
+> "Còn đầu việc nào quá hạn không?"
+
 Treat these as requests for actual Odoo business data.
+
+"Dự án" and "công việc" here mean a department's work board, not a software
+project. Whether a task is finished is read from its **board column**
+(`stage_id`), not from the status field — the two disagree by roughly eight
+to one in this database, and the board is what staff actually maintain. The
+`odoo-project-tasks` skill carries the field names, the stage-vs-status
+evidence, and the Vietnamese spelling trap that makes a stage search return
+zero. Load it before answering anything beyond a simple count.
 
 ---
 
