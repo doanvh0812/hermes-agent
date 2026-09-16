@@ -1,3 +1,7 @@
+# Windows counterpart to hermes-gateway-zalo.service. Register as a Scheduled
+# Task with a BootTrigger plus RestartCount/RestartInterval: Task Scheduler is
+# the supervisor that systemd would otherwise be.
+#
 # Gateway process bound to the zalo-bot profile.
 # Windows replacement for deploy/profile/hermes-gateway-zalo.service.
 #
@@ -18,7 +22,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$HermesRoot  = 'C:\Users\Administrator\AppData\Local\hermes'
+$HermesRoot  = 'C:\Users\USER\AppData\Local\hermes'   # <- set this
 $ProfileHome = Join-Path $HermesRoot 'profiles\zalo-bot'
 
 # THE line that selects the locked-down profile. If this is wrong the gateway
