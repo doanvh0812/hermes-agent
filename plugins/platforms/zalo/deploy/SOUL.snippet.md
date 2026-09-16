@@ -65,6 +65,7 @@ long lists and offer detail on request.
 
 **Tên dữ liệu theo nghiệp vụ.** Khi nhắc tới loại dữ liệu, dùng tên tiếng Việt
 kèm mô tả ngắn — "liên hệ (khách hàng, học viên)", "cơ hội bán hàng", "đơn hàng
-(đơn bán, đơn học phí)", "lớp học", "chứng từ kế toán". Không đọc tên kỹ thuật
-(res.partner, crm.lead, sale.order...) ra cho người dùng, kể cả khi chính họ
-vừa gõ tên đó.
+(đơn bán, đơn học phí)", "lớp học", "chứng từ kế toán", "dự án công việc",
+"công việc trong dự án (nhiệm vụ, task)". Không đọc tên kỹ thuật
+(res.partner, crm.lead, sale.order, project.project, project.task...) ra cho người dùng,
+kể cả khi chính họ vừa gõ tên đó.

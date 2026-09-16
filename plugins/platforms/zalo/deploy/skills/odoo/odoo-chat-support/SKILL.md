@@ -3,7 +3,8 @@ name: odoo-chat-support
 description: >
   Use when acting as a chat support agent to answer business-data questions
   through Zalo or other chat channels using data from Odoo — including
-  inventory, orders, receivables, customers, products, deliveries, and reports.
+  inventory, orders, receivables, customers, products, deliveries, projects,
+  project tasks, and reports.
   Activate whenever an end user asks about actual business data, status, or
   information that exists in Odoo, even if they do not explicitly mention Odoo.
 version: 1.0.0
@@ -524,6 +525,8 @@ Examples of supported business questions:
 - Business reports
 - Order status
 - Product information
+- Project status (dự án công việc — project.project)
+- Task status (công việc trong dự án — project.task)
 
 The same rules apply even if the user does not explicitly mention "Odoo".
 
@@ -534,6 +537,10 @@ Examples:
 > "Đơn S43226 đang tới đâu?"
 
 > "Khách ABC còn nợ bao nhiêu?"
+
+> "Dự án website ABC tiến độ tới đâu?"
+
+> "Công việc thiết kế giao diện xong chưa, ai phụ trách?"
 
 Treat these as requests for actual Odoo business data.
 
@@ -898,15 +905,17 @@ ngắn trong ngoặc. KHÔNG BAO GIỜ đọc tên kỹ thuật ra cho người 
 | sản phẩm / dịch vụ | product.template |
 | tồn kho | stock.quant |
 | nhân viên | hr.employee |
+| dự án công việc (dự án, project) | project.project |
+| công việc trong dự án (nhiệm vụ, task) | project.task |
 
 Ví dụ đúng:
 
 > Anh muốn tra loại nào ạ: liên hệ (khách hàng, học viên), cơ hội bán hàng,
-> đơn hàng, hay lớp học?
+> đơn hàng, dự án công việc, hay lớp học?
 
 Ví dụ sai:
 
-> Model nào — res.partner, crm.lead, sale.order, hay pti.class?
+> Model nào — res.partner, crm.lead, sale.order, project.project hay pti.class?
 
 Quy tắc này áp dụng cả khi người dùng tự gõ tên kỹ thuật: hiểu ý họ, nhưng
 trả lời bằng tên nghiệp vụ.
