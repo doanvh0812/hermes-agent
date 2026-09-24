@@ -67,15 +67,47 @@ If a signature ever looks wrong, stop and report it instead.
 5. `find_billable_line(class_code=..., partner_name=...)`. One candidate →
    propose. Several → list, let them pick. `class_not_found`,
    `no_order_line_for_partner`, `all_instalments_invoiced` → say so, don't guess.
-6. Show the five figures + student + class + which instalment back, state
-   plainly nothing recorded yet, wait for the sender's own agreement in that
-   thread. "ok" counts; anything unclear → ask again.
+   Each candidate carries `payers` — the three names that could end up on the
+   invoice, one per payer type. Read the one matching step 3 out of that dict;
+   never assemble the name yourself.
+
+   **Matching is loose on purpose.** Class code and student name both go
+   through `ilike`, so `Class-00377` finds `CLASS-00377` and `Như Thuỳ` finds
+   `Phạm Thị Như Thuỳ`. Do not ask the sender to retype something exactly —
+   the point is that they should not have to. `ambiguous_class` comes back
+   with a `candidates` list: show the codes and names, ask which, never pick
+   the first. Several order lines matching one name works the same way.
+
+   The cost of loose matching is that a near-miss now looks like a hit, so
+   **echo the class code and the student name you actually landed on** in the
+   confirmation — that is the sender's only chance to catch a wrong match
+   before the invoice is posted.
+6. Show the five figures + student + class + which instalment back **and name
+   the party the invoice will be issued to**, then state plainly that nothing
+   is recorded yet and wait for the sender's own agreement in that thread.
+   "ok" counts; anything unclear → ask again.
+
+   The payer line is not optional and "thu của đối tác" does not satisfy it —
+   a class has a different đối tác on every order line, so the type alone
+   names nobody. Write the party out:
+
+       Hóa đơn xuất cho: c Anna Hường (đối tác)
+
+   This is the one figure on the confirmation the sender cannot check against
+   the slip in their hand: the slip shows what was transferred, not who the
+   invoice will name. If `payers` has no entry for the chosen type, say the
+   order line carries no such party and ask — do not fall back to the
+   student, and do not call the write, which refuses this anyway
+   (`no_partner_for_receipt_type`).
 7. Write. Matched line → `create_invoice_and_payment`. No match but they want
    it logged → `record_transfer_receipt`.
-8. Report: invoice number + "đã ghi nhận, đang chờ đối soát với sao kê ngân
-   hàng". Never say "đã tất toán/settled" — result carries
-   `payment_state: in_payment`, money booked but not reconciled. `duplicate`
-   result → report the existing invoice, do not write again.
+8. Report the invoice number and that the payment has been recorded. The
+   call reconciles on the spot by design, so the result carries
+   `state: reconciled` and `payment_state: paid` — do not claim it is
+   "chờ đối soát", that is not what the books now say. Do add one clause that
+   the figures came from the slip the sender supplied, because nobody checked
+   them against a bank statement. `duplicate` result → report the existing
+   invoice, do not write again.
 
 ## Reply style (Zalo)
 

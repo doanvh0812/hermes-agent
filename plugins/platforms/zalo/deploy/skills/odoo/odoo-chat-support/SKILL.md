@@ -200,16 +200,27 @@ answer that you are unable to help — filing the receipt is part of the job.
    ordinary, and guessing there books the money against the wrong person.
 
 5. **Find the instalment** with `find_billable_line`, passing the class code
-   and the student name. One candidate — propose it. Several — list them and
-   let the sender pick; never choose for them. `class_not_found` or
-   `no_order_line_for_partner` means say so and ask, not guess.
+   and the student name. Both are matched loosely (`ilike`), so the sender's
+   own spelling is fine — `Class-00377` finds `CLASS-00377`, `Như Thuỳ` finds
+   the full name. Never make them retype anything exactly. One candidate —
+   propose it. Several, or `ambiguous_class` with its `candidates` list —
+   show them and let the sender pick; never choose for them. Because matching
+   is loose, always echo back the class code and student name you landed on.
+   `class_not_found` or `no_order_line_for_partner` means say so and ask,
+   not guess.
    `all_instalments_invoiced` means every instalment on that order is already
    billed: say that plainly rather than issuing another one.
 
 6. **Show the figures back and wait.** Repeat the five values, the student,
-   the class and which instalment this is, and say plainly that nothing has
-   been recorded yet. Only after the sender — the same person, in the same
-   thread — clearly agrees may you write. An unclear reply means ask again.
+   the class, which instalment this is, **and the party the invoice will be
+   made out to, by name** — that party comes from the `payers` entry on the
+   candidate, picked by the payer type from step 3. Naming the type alone is
+   not enough: one class has a different đối tác on each order line, so
+   "thu của đối tác" identifies nobody, and an invoice in the wrong name is
+   the one error the sender cannot spot from the slip. Then say plainly that
+   nothing has been recorded yet. Only after the sender — the same person, in
+   the same thread — clearly agrees may you write. An unclear reply means ask
+   again.
 
 7. **Write it.** Normally `create_invoice_and_payment` with the
    `order_line_id` from step 5: this issues the invoice, posts it, and records
@@ -219,12 +230,13 @@ answer that you are unable to help — filing the receipt is part of the job.
 
 8. **Report what actually happened.** After
    `create_invoice_and_payment`, give the invoice number and say the payment
-   is recorded and awaiting bank reconciliation — the money is booked but not
-   yet confirmed against the statement, so do not call it "settled". After
-   `record_transfer_receipt`, say the receipt is filed and waiting for
-   accounting. A `duplicate` result means this transaction reference was
-   already handled: say so, report the existing invoice, and do not write
-   again.
+   has been recorded — this call reconciles immediately by design, so the
+   books now read as collected and "chờ đối soát" would be wrong. Say in one
+   clause that the figures came from the slip the sender sent, since no one
+   has checked them against a bank statement. After `record_transfer_receipt`,
+   say the receipt is filed and waiting for accounting. A `duplicate` result
+   means this transaction reference was already handled: say so, report the
+   existing invoice, and do not write again.
 
 ### Never "test" a write operation
 
