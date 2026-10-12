@@ -223,6 +223,26 @@ def running_model() -> Dict[str, str]:
     return {"model": model, "at": at}
 
 
+def gateway_started() -> str:
+    """Mốc khởi động của tiến trình gateway đang chạy, đọc từ gateway.log.
+
+    Cần nó để phân biệt hai tình huống trông giống nhau trên giao diện:
+    "đã lưu nhưng chưa khởi động lại" (lệch thật) và "đã khởi động lại rồi
+    nhưng chưa ai nhắn cho bot" (không lệch, chỉ là chưa có số liệu). Thiếu
+    mốc này thì trường hợp thứ hai hiện ra y như một lỗi.
+    """
+    log = hermes_home() / "logs" / "gateway.log"
+    if not log.is_file():
+        return ""
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    hits = re.findall(
+        r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d).*Starting Hermes Gateway", text, re.M)
+    return hits[-1] if hits else ""
+
+
 def write_saved_model(model: str) -> Optional[str]:
     """Đổi đúng dòng `default:` trong khối `model:`; trả thông báo lỗi nếu có.
 
@@ -835,15 +855,20 @@ async def api_model(request: Request):
         return r
     sv = saved_model()
     run = running_model()
+    started = gateway_started()
+    # Lượt chat gần nhất có trước khi gateway khởi động lại thì nó nói về tiến
+    # trình CŨ — không chứng minh được gì về model đang chạy, và tuyệt đối
+    # không phải bằng chứng lệch. So chuỗi ngày-giờ là đủ vì cùng một định dạng.
+    stale = bool(started and run["at"] and run["at"] < started)
     return {
         "saved": sv["model"],
         "provider": sv["provider"],
-        "running": run["model"],
-        "running_at": run["at"],
-        # Lưu rồi mà chưa khởi động lại thì gateway vẫn chạy model cũ. Dòng log
-        # chỉ cập nhật khi có lượt chat mới, nên "running" có thể là của lượt
-        # cũ — UI phải nói rõ mốc thời gian chứ không được coi là hiện tại.
-        "mismatch": bool(run["model"] and sv["model"] and run["model"] != sv["model"]),
+        "running": "" if stale else run["model"],
+        "running_at": "" if stale else run["at"],
+        "started_at": started,
+        "stale": stale,
+        "mismatch": bool(
+            not stale and run["model"] and sv["model"] and run["model"] != sv["model"]),
         "choices": MODEL_CHOICES,
     }
 

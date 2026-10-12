@@ -194,7 +194,6 @@
     </div>
   </div>
 
-</div>
   <!-- ── model ──────────────────────────────────────── -->
   <div class="panel" id="p-model">
     <div class="note" id="model-state">đang tải…</div>
@@ -210,7 +209,7 @@
       đo thật trên 4 biên lai chuyển khoản của VNI, đối chiếu với số liệu đã được
       người xác nhận trong Odoo — không phải xếp hạng chung của model.</div>
   </div>
-
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -443,12 +442,17 @@ async function loadModel(){
     const warn = d.mismatch
       ? `<div style="color:var(--risk)"><b>Đã lưu nhưng chưa áp dụng.</b>
          Config ghi <b>${esc(d.saved)}</b> còn gateway chạy <b>${esc(d.running)}</b>
-         — bấm “Khởi động lại gateway”.</div>` : '';
+         — bấm “Khởi động lại gateway”.</div>`
+      : (d.stale
+        ? `<div>Gateway đã khởi động lại lúc <span class="mono">${esc(d.started_at)}</span>
+           và <b>chưa có lượt chat nào</b> từ đó, nên chưa đọc được model đang chạy.
+           Sẽ hiện ngay khi có người nhắn cho bot.</div>` : '');
     $('#model-state').innerHTML =
       `Đã lưu trong config: <b>${esc(d.saved) || '—'}</b>
        &nbsp;·&nbsp; provider: <span class="mono">${esc(d.provider) || '—'}</span><br>
-       Gateway đang chạy: <b>${esc(d.running) || 'chưa có lượt nào'}</b>
+       Gateway đang chạy: <b>${esc(d.running) || '— chưa có số liệu'}</b>
        ${d.running_at ? `<span class="mono">(lượt lúc ${esc(d.running_at)})</span>` : ''}
+       ${d.started_at ? `<br><span class="note" style="display:inline">khởi động lúc ${esc(d.started_at)}</span>` : ''}
        ${warn}`;
     const badge = g => ({
       ok:'<span class="state allow">đã đo, đạt</span>',
