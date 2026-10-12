@@ -108,6 +108,7 @@
     <button role="tab" data-tab="groups" aria-selected="false">Nhóm</button>
     <button role="tab" data-tab="login"  aria-selected="false">Đăng nhập Zalo</button>
     <button role="tab" data-tab="audit"  aria-selected="false">Nhật ký</button>
+    <button role="tab" data-tab="model"  aria-selected="false">Model</button>
   </nav>
 
   <!-- ── người dùng ─────────────────────────────────── -->
@@ -194,6 +195,22 @@
   </div>
 
 </div>
+  <!-- ── model ──────────────────────────────────────── -->
+  <div class="panel" id="p-model">
+    <div class="note" id="model-state">đang tải…</div>
+    <div class="note">Đổi model chỉ có hiệu lực sau khi <b>khởi động lại gateway</b>.
+      Ô “đang chạy” đọc từ lượt chat gần nhất — nên sau khi khởi động lại nó vẫn
+      hiện model cũ cho tới khi có người nhắn cho bot.</div>
+    <div id="model-list"></div>
+    <div class="bar" style="margin-top:.9rem">
+      <button class="btn" id="model-save">Lưu lựa chọn</button>
+      <button class="btn" id="model-restart">Khởi động lại gateway</button>
+    </div>
+    <div class="note">Giá theo $/1 triệu token. Nhận xét trong mỗi dòng là kết quả
+      đo thật trên 4 biên lai chuyển khoản của VNI, đối chiếu với số liệu đã được
+      người xác nhận trong Odoo — không phải xếp hạng chung của model.</div>
+  </div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -226,6 +243,7 @@ document.querySelectorAll('nav button').forEach(b=>{
     document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
     $('#p-' + b.dataset.tab).classList.add('on');
     if(b.dataset.tab === 'audit') loadAudit();
+    if(b.dataset.tab === 'model') loadModel();
     if(b.dataset.tab === 'groups' && !groups.length) loadDir('groups');
   };
 });
@@ -414,6 +432,58 @@ async function loadAudit(){
 }
 $('#refresh-audit').onclick = loadAudit;
 $('#aq').oninput = ()=>{ clearTimeout(window._aqt); window._aqt = setTimeout(loadAudit, 350); };
+
+
+// ── model ─────────────────────────────────────────────
+let modelData = null;
+async function loadModel(){
+  try{
+    modelData = await api('/api/model');
+    const d = modelData;
+    const warn = d.mismatch
+      ? `<div style="color:var(--risk)"><b>Đã lưu nhưng chưa áp dụng.</b>
+         Config ghi <b>${esc(d.saved)}</b> còn gateway chạy <b>${esc(d.running)}</b>
+         — bấm “Khởi động lại gateway”.</div>` : '';
+    $('#model-state').innerHTML =
+      `Đã lưu trong config: <b>${esc(d.saved) || '—'}</b>
+       &nbsp;·&nbsp; provider: <span class="mono">${esc(d.provider) || '—'}</span><br>
+       Gateway đang chạy: <b>${esc(d.running) || 'chưa có lượt nào'}</b>
+       ${d.running_at ? `<span class="mono">(lượt lúc ${esc(d.running_at)})</span>` : ''}
+       ${warn}`;
+    const badge = g => ({
+      ok:'<span class="state allow">đã đo, đạt</span>',
+      risk:'<span class="state deny">có rủi ro</span>',
+      untested:'<span class="state none">chưa đo</span>'}[g] || '');
+    $('#model-list').innerHTML = d.choices.map(c => `
+      <label style="display:block;border:1px solid var(--line);border-radius:.5rem;
+                    padding:.7rem .9rem;margin:.5rem 0;cursor:pointer">
+        <input type="radio" name="mdl" value="${esc(c.id)}"
+               ${c.id === d.saved ? 'checked' : ''}>
+        <b>${esc(c.label)}</b> <span class="mono">${esc(c.id)}</span> ${badge(c.grade)}
+        <div class="note" style="margin:.35rem 0 0">
+          ngữ cảnh ${esc(c.ctx)} · vào $${esc(c.price_in)}/M · ra $${esc(c.price_out)}/M
+        </div>
+        <div class="note" style="margin:.2rem 0 0">${esc(c.note)}</div>
+      </label>`).join('');
+  }catch(e){ $('#model-state').textContent = e.message; }
+}
+$('#model-save').onclick = async ()=>{
+  const sel = document.querySelector('input[name=mdl]:checked');
+  if(!sel){ toast('Chưa chọn model nào'); return; }
+  try{
+    await api('/api/model', {method:'POST', body: JSON.stringify({model: sel.value})});
+    toast('Đã lưu — cần khởi động lại gateway để áp dụng');
+    loadModel();
+  }catch(e){ toast(e.message); }
+};
+$('#model-restart').onclick = async ()=>{
+  if(!confirm('Khởi động lại gateway? Bot sẽ gián đoạn khoảng 30 giây.')) return;
+  try{
+    const r = await api('/api/gateway/restart', {method:'POST'});
+    toast(r.hint || 'Đã gửi lệnh khởi động lại');
+    setTimeout(loadModel, 8000);
+  }catch(e){ toast(e.message); }
+};
 
 // ── init ──────────────────────────────────────────────
 loadStatus();

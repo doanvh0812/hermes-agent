@@ -47,6 +47,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -127,6 +128,145 @@ def env_value(name: str) -> str:
 def bridge_base() -> str:
     port = env_value("ZALO_BRIDGE_PORT") or "8647"
     return f"http://127.0.0.1:{port}"
+
+
+# ── model catalog ─────────────────────────────────────────────────────────
+# Chỉ liệt kê model dùng được với provider đang cấu hình (openai-api). Đổi
+# provider cần thêm khóa API và phải làm từ CLI, không phải từ trang này.
+#
+# `grade` không phải xếp hạng chung — nó là kết quả đo trên 4 biên lai thật
+# của VNI (12/10/2026), đối chiếu với số liệu người đã xác nhận trong Odoo.
+# Đọc biên lai là việc rủi ro nhất của bot, nên đó là thước đo đúng.
+MODEL_CHOICES: List[Dict[str, Any]] = [
+    {
+        "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra",
+        "ctx": "1,05M", "price_in": 2, "price_out": 12, "grade": "ok",
+        "note": "Đã đo trên 4 biên lai thật: đúng 16/16 trường. "
+                "Rẻ hơn Sol khoảng 60% mà không mất độ chính xác nào.",
+    },
+    {
+        "id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+        "ctx": "1,05M", "price_in": 5, "price_out": 30, "grade": "ok",
+        "note": "Đã đo: đúng 16/16 trường. Bot dùng model này từ 08/2026 đến 12/10/2026.",
+    },
+    {
+        "id": "gpt-5.6", "label": "GPT-5.6",
+        "ctx": "1,05M", "price_in": 4, "price_out": 20, "grade": "untested",
+        "note": "Chưa đo trên biên lai của VNI.",
+    },
+    {
+        "id": "gpt-5.4", "label": "GPT-5.4",
+        "ctx": "1,05M", "price_in": 2.5, "price_out": 15, "grade": "risk",
+        "note": "Đã đo: ĐỌC SAI mã giao dịch ở 1/4 ảnh — ra FT262092888884020 "
+                "thay vì FT26209288884020. Mã giao dịch là khóa chống trùng, "
+                "sai mã thì ảnh gửi lại lần hai không bị phát hiện. "
+                "Không khuyến nghị cho luồng biên lai.",
+    },
+    {
+        "id": "gpt-5.6-luna", "label": "GPT-5.6 Luna",
+        "ctx": "1,05M", "price_in": 0.2, "price_out": 1.2, "grade": "risk",
+        "note": "Rẻ nhất nhưng chưa đo, và là tier thấp. Không khuyến nghị cho "
+                "đường ghi tiền thật.",
+    },
+]
+GATEWAY_TASK = os.environ.get("ZALO_GATEWAY_TASK", "HermesZaloGateway")
+
+
+def profile_config() -> Path:
+    return hermes_home() / "config.yaml"
+
+
+def saved_model() -> Dict[str, str]:
+    """Model ghi trong config.yaml — model sẽ dùng ở lần khởi động tới."""
+    path = profile_config()
+    if not path.is_file():
+        return {"model": "", "provider": ""}
+    model = provider = ""
+    in_model = False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if re.match(r"^model:\s*$", line):
+            in_model = True
+            continue
+        if in_model:
+            if line.strip() and line[:1] not in (" ", "\t"):
+                break
+            if m := re.match(r"\s+default:\s*(\S+)", line):
+                model = m.group(1).strip().strip("'\"")
+            elif m := re.match(r"\s+provider:\s*(\S+)", line):
+                provider = m.group(1).strip().strip("'\"")
+    return {"model": model, "provider": provider}
+
+
+def running_model() -> Dict[str, str]:
+    """Model gateway ĐANG chạy, đọc từ lượt hội thoại gần nhất trong agent.log.
+
+    Config nói lên ý định; dòng log này nói lên sự thật. Hai cái lệch nhau
+    nghĩa là đã lưu nhưng chưa khởi động lại — đúng kiểu lỗi im lặng mà
+    deployment này đã gặp nhiều lần, nên trang quản trị hiện cả hai.
+    """
+    log = hermes_home() / "logs" / "agent.log"
+    if not log.is_file():
+        return {"model": "", "at": ""}
+    try:
+        with log.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            back = min(fh.tell(), 400_000)
+            fh.seek(-back, os.SEEK_END)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {"model": "", "at": ""}
+    hits = re.findall(
+        r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d).*?model=(\S+)\s+provider=", tail, re.M)
+    if not hits:
+        return {"model": "", "at": ""}
+    at, model = hits[-1]
+    return {"model": model, "at": at}
+
+
+def write_saved_model(model: str) -> Optional[str]:
+    """Đổi đúng dòng `default:` trong khối `model:`; trả thông báo lỗi nếu có.
+
+    Sửa từng dòng thay vì load/dump lại YAML: dump xóa sạch chú thích và đảo
+    thứ tự khóa trong một file mà chính Hermes cũng ghi vào.
+    """
+    path = profile_config()
+    if not path.is_file():
+        return "Không tìm thấy config.yaml của profile"
+    original = path.read_text(encoding="utf-8", errors="replace")
+    out: List[str] = []
+    in_model = done = False
+    for line in original.splitlines(keepends=True):
+        if re.match(r"^model:\s*$", line):
+            in_model = True
+            out.append(line)
+            continue
+        if in_model and not done:
+            if line.strip() and line[:1] not in (" ", "\t"):
+                in_model = False
+            elif re.match(r"\s+default:\s*\S+", line):
+                indent = re.match(r"(\s+)", line).group(1)
+                out.append(indent + "default: " + model + "\n")
+                done = True
+                continue
+        out.append(line)
+    if not done:
+        return "Không tìm thấy dòng model.default trong config.yaml"
+
+    new = "".join(out)
+    try:
+        import yaml
+        parsed = yaml.safe_load(new) or {}
+        if (parsed.get("model") or {}).get("default") != model:
+            return "Ghi xong nhưng đọc lại không ra model vừa chọn — đã hủy"
+    except Exception as exc:  # YAML vỡ thì tuyệt đối không ghi
+        return "File sau khi sửa không phải YAML hợp lệ: " + str(exc)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path.with_suffix(".yaml.bak-" + stamp).write_text(original, encoding="utf-8")
+    tmp = path.with_suffix(".yaml.tmp")
+    tmp.write_text(new, encoding="utf-8")
+    os.replace(tmp, path)
+    return None
 
 
 def store() -> AllowlistStore:
@@ -688,6 +828,82 @@ async def api_audit(request: Request, limit: int = 200, q: str = ""):
 
 
 # ── entry point ────────────────────────────────────────────────────────────
+
+@app.get("/api/model")
+async def api_model(request: Request):
+    if r := deny(request):
+        return r
+    sv = saved_model()
+    run = running_model()
+    return {
+        "saved": sv["model"],
+        "provider": sv["provider"],
+        "running": run["model"],
+        "running_at": run["at"],
+        # Lưu rồi mà chưa khởi động lại thì gateway vẫn chạy model cũ. Dòng log
+        # chỉ cập nhật khi có lượt chat mới, nên "running" có thể là của lượt
+        # cũ — UI phải nói rõ mốc thời gian chứ không được coi là hiện tại.
+        "mismatch": bool(run["model"] and sv["model"] and run["model"] != sv["model"]),
+        "choices": MODEL_CHOICES,
+    }
+
+
+@app.post("/api/model")
+async def api_model_set(request: Request, payload: Dict[str, Any] = Body(...)):
+    if r := deny(request):
+        return r
+    if not csrf_ok(request):
+        return JSONResponse({"error": "CSRF token không hợp lệ"}, status_code=403)
+    model = str(payload.get("model") or "").strip()
+    allowed = {c["id"] for c in MODEL_CHOICES}
+    if model not in allowed:
+        # Danh sách trắng, không nhận chữ tự do: một cái tên gõ sai sẽ làm mọi
+        # lượt chat lỗi, và lỗi đó chỉ lộ ra khi có người nhắn cho bot.
+        return JSONResponse(
+            {"error": "Model không có trong danh sách cho phép"}, status_code=400)
+    if err := write_saved_model(model):
+        return JSONResponse({"error": err}, status_code=500)
+    return {"ok": True, "saved": model, "restart_needed": True}
+
+
+@app.post("/api/gateway/restart")
+async def api_gateway_restart(request: Request):
+    """Khởi động lại gateway để model vừa chọn có hiệu lực.
+
+    Dùng schtasks /End rồi /Run, KHÔNG diệt tiến trình theo tên: trang quản trị
+    cũng là một python.exe, diệt theo tên là tự giết chính nó. /End kết thúc
+    instance của task; nếu tiến trình con tách rời còn sống thì cờ --replace
+    trong run-gateway.ps1 sẽ để bản mới chiếm chỗ bản cũ.
+    """
+    if r := deny(request):
+        return r
+    if not csrf_ok(request):
+        return JSONResponse({"error": "CSRF token không hợp lệ"}, status_code=403)
+    if sys.platform != "win32":
+        return JSONResponse(
+            {"error": "Chỉ hỗ trợ trên Windows (Task Scheduler)"}, status_code=400)
+    try:
+        subprocess.run(["schtasks", "/End", "/TN", GATEWAY_TASK],
+                       capture_output=True, timeout=30)
+        time.sleep(3)
+        run = subprocess.run(["schtasks", "/Run", "/TN", GATEWAY_TASK],
+                             capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return JSONResponse({"error": "Không gọi được schtasks: " + str(exc)},
+                            status_code=500)
+    if run.returncode != 0:
+        detail = (run.stderr or run.stdout or "").strip()[:200]
+        return JSONResponse(
+            {"error": "schtasks /Run thất bại: " + detail}, status_code=500)
+    return {
+        "ok": True,
+        "task": GATEWAY_TASK,
+        # Dòng log model chỉ đổi khi có lượt chat kế tiếp, nên đừng để UI
+        # khẳng định đã xong dựa vào lần đọc ngay sau đây.
+        "hint": "Gateway đang khởi động lại. Ô \u201cđang chạy\u201d chỉ cập nhật "
+                "sau lượt chat kế tiếp.",
+    }
+
 
 def cmd_set_password() -> int:
     import getpass
