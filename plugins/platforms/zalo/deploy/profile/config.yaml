@@ -45,6 +45,42 @@ agent:
 plugins:
   enabled: []
 
+# Context compaction. The defaults look active and are not: `enabled: true`
+# with the percentage threshold means compaction never fires on a
+# large-window model, so a long chat thread grows until every turn re-reads
+# the whole transcript. Measured on this deployment: one 203-message DM
+# reached 171K tokens and accounted for $11.86 of $15.48 total spend, while
+# `compacted=1` counted 0 messages out of 389 across 9 sessions.
+compression:
+  # lean, not the legacy default. The summary then carries every real user
+  # message verbatim (they override any paraphrase of them), a harvested
+  # index of identifiers, per-chunk digests instead of one flat summary
+  # (upstream's own eval put flat-summary recall at ~33%), tool results
+  # demoted to stubs with recovery pointers rather than deleted, and a footer
+  # naming the exact session_search call that reaches the compacted region —
+  # every pre-compaction message stays in state.db, so compaction is deferred
+  # retrieval rather than loss. Keep `session_search` in platform_toolsets or
+  # that recovery pointer names a tool the agent does not have.
+  #
+  # legacy also keeps a verbatim tail of 0.20 x context window: 210K tokens on
+  # a 1.05M model, larger than any session this bot has ever had, so even a
+  # triggered compaction would reclaim almost nothing. lean clamps the tail to
+  # 2.5%, 10K-25K.
+  tail_mode: lean
+
+  # Absolute, not the 0.5 fraction. 0.5 x 1.05M = 525K — three times the
+  # longest session on record. An absolute figure also survives a model
+  # change, which a percentage does not: switching to a wider window silently
+  # raises the trigger point.
+  #
+  # 80K sits well above a fresh session's floor (~20K: SOUL.md, tool schemas,
+  # loaded skills), so ordinary short lookups are untouched.
+  threshold_tokens: 80000
+
+  # Length alone misses the shape a chat bot actually has: a thread goes quiet
+  # for days, then someone replies into it and the whole history is re-read.
+  idle_compact_after_seconds: 7200
+
 mcp_servers:
   odoo:
     command: uvx
