@@ -45,6 +45,30 @@ agent:
 plugins:
   enabled: []
 
+# Background-review notices in chat. The agent's self-improvement pass writes
+# memory and patches skills between turns, then announces it:
+#
+#   💾 Self-improvement review: Memory updated · User profile updated
+#   💾 Self-improvement review: Skill 'odoo-lookup-diagnostics' created. · …
+#
+# That is the agent talking about its own housekeeping, delivered into a
+# business chat where staff are asking about invoices. Turn it off for a
+# user-facing bot. `off` suppresses only the chat delivery — the same line
+# still goes to stdout, so logs/gateway.log keeps the record of which skill
+# was patched and when.
+display:
+  # MUST be top level. config_defaults.py advertises a per-platform override
+  # (display.platforms.<platform>.memory_notifications), but the gateway reads
+  # user_config["display"]["memory_notifications"] directly in gateway/run.py
+  # — it does not route this key through gateway/display_config.py, which
+  # never mentions it. Setting it per platform has no effect and reports no
+  # error.
+  #
+  # Quoted on purpose: bare `off` is YAML boolean false. The gateway coerces
+  # bools, so both happen to work, but the string matches the documented
+  # values (off | on | verbose) and does not lean on that coercion.
+  memory_notifications: "off"
+
 # Context compaction. The defaults look active and are not: `enabled: true`
 # with the percentage threshold means compaction never fires on a
 # large-window model, so a long chat thread grows until every turn re-reads
