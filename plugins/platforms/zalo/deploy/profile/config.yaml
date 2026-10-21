@@ -69,6 +69,24 @@ display:
   # values (off | on | verbose) and does not lean on that coercion.
   memory_notifications: "off"
 
+  # Suppresses, when a user messages while the bot is mid-turn:
+  #
+  #   ⚡ Interrupting current task (iteration 1/20). I'll respond to your
+  #      message shortly.
+  #
+  # Staff asking about an invoice do not need to know which iteration the
+  # agent is on. Their message is still processed exactly as before — only
+  # the acknowledgement is dropped.
+  #
+  # Read ONCE at gateway startup and exported as
+  # HERMES_GATEWAY_BUSY_ACK_ENABLED (gateway/run.py), not re-read per turn, so
+  # changing this REQUIRES a gateway restart — unlike memory_notifications
+  # above, which rides the mtime-keyed config cache.
+  #
+  # display.busy_ack_detail only trims the "(iteration 1/20)" part; it does not
+  # stop the message.
+  busy_ack_enabled: false
+
 # Context compaction. The defaults look active and are not: `enabled: true`
 # with the percentage threshold means compaction never fires on a
 # large-window model, so a long chat thread grows until every turn re-reads
