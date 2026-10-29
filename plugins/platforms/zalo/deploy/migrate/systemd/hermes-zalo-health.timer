@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Zalo bot health check every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+# Without this, a host that was off or a run that took long silently skips
+# its slot and the gap never shows up anywhere.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

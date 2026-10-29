@@ -2,3 +2,15 @@ bridge/node_modules/
 bridge/zalo-login-qr.png
 __pycache__/
 *.pyc
+
+# Migration bundles: profile state, including .env and the Zalo session.
+# Never committed, wherever -OutDir happens to point.
+deploy/migrate/*.tar.gz
+deploy/migrate/*.sha256
+deploy/migrate/unpacked/
+
+# The repo root .gitignore has a bare `export*` pattern, which silently
+# swallows this file -- the one script the Windows side of the migration
+# needs, with a clean `git status` to go with it. Found when it failed to
+# stage. Re-include it explicitly.
+!deploy/migrate/export-bundle.ps1

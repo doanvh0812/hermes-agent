@@ -1,0 +1,8 @@
+# systemd refuses nothing for a CRLF unit file -- it just carries the \r INTO
+# the value, so Environment="PATH=/usr/bin\r" silently breaks every lookup.
+# The repo has core.autocrlf=true on the Windows box these were written on, so
+# say it explicitly rather than rely on the default.
+*.service text eol=lf
+*.timer   text eol=lf
+*.conf    text eol=lf
+*.sh      text eol=lf

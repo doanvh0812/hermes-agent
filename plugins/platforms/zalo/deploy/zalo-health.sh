@@ -22,9 +22,21 @@ STATE="$HERMES_HOME/zalo/.health-state"
 
 # Gateway unit to check. Empty disables that check (e.g. non-systemd hosts).
 GATEWAY_UNIT="${ZALO_GATEWAY_UNIT-hermes-gateway-zalo}"
+# System units by default. `systemctl --user` needs loginctl enable-linger or
+# the units stop with the last login session and never return at boot, so the
+# migrated deployment installs SYSTEM units. Set ZALO_SYSTEMCTL_SCOPE=--user
+# for a host that really does run them per-user.
+SYSTEMCTL_SCOPE="${ZALO_SYSTEMCTL_SCOPE-}"
 
+# \r is deliberate: a profile .env that came from Windows has CRLF, and
+# without this the token carries a trailing carriage return into the HTTP
+# header. Measured against the live bridge: that is NOT a token mismatch --
+# node's HTTP parser rejects the malformed request with 400 and an EMPTY
+# body, well before the token is ever compared. So the symptom is "no reply",
+# which is why step 4 below checks the status code and not just the
+# "bad bridge token" string.
 envval() {
-    grep -m1 "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"''
+    grep -m1 "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r"'"'"''
 }
 
 TOK="$(envval ZALO_BRIDGE_TOKEN)"
@@ -55,7 +67,7 @@ fail() {
     notify "🔴 Zalo bot DOWN — ${reason}${detail:+
 ${detail}}
 
-Kiểm tra: systemctl --user status ${GATEWAY_UNIT:-hermes-gateway-zalo}"
+Kiểm tra: systemctl ${SYSTEMCTL_SCOPE} status ${GATEWAY_UNIT:-hermes-gateway-zalo}"
     exit 1
 }
 
@@ -68,7 +80,8 @@ recovered() {
 
 # ---- 1. gateway process ---------------------------------------------------
 if [ -n "$GATEWAY_UNIT" ] && command -v systemctl >/dev/null 2>&1; then
-    if ! systemctl --user is-active --quiet "$GATEWAY_UNIT" 2>/dev/null; then
+    # shellcheck disable=SC2086  # SYSTEMCTL_SCOPE is one optional flag or empty
+    if ! systemctl $SYSTEMCTL_SCOPE is-active --quiet "$GATEWAY_UNIT" 2>/dev/null; then
         fail "gateway không chạy" "Không có tiến trình nào đọc tin nhắn từ bridge."
     fi
 fi
@@ -85,11 +98,31 @@ grep -q '"ready":true' <<<"$HEALTH" \
 
 # ---- 4. token matches -----------------------------------------------------
 if [ -n "$TOK" ]; then
+    # Measured status codes on the live bridge: 200 = accepted,
+    # 401 = {"error":"bad bridge token"}, 400 = the request itself was
+    # malformed (a stray \r in the token does this) and never reached the
+    # comparison. Only the 401 carries a body, so a string match alone lets
+    # the 400 through and the monitor reports ok while the adapter reads
+    # nothing.
     EV="$(curl -s --max-time 5 -H "X-Bridge-Token: $TOK" \
-          "http://127.0.0.1:$PORT/events?since=0" 2>/dev/null)"
-    grep -q 'bad bridge token' <<<"$EV" \
-        && fail "token không khớp" \
-                "Adapter không đọc được tin nhắn. Đặt ZALO_BRIDGE_TOKEN giống nhau rồi khởi động lại cả hai."
+          -w $'\n%{http_code}' "http://127.0.0.1:$PORT/events?since=0" 2>/dev/null)"
+    CODE="${EV##*$'\n'}"
+    BODY="${EV%$'\n'*}"
+    case "$CODE" in
+        200)
+            grep -q 'bad bridge token' <<<"$BODY" \
+                && fail "token không khớp" \
+                        "Adapter không đọc được tin nhắn. Đặt ZALO_BRIDGE_TOKEN giống nhau rồi khởi động lại cả hai."
+            ;;
+        401)
+            fail "token không khớp" \
+                 "Adapter không đọc được tin nhắn. Đặt ZALO_BRIDGE_TOKEN giống nhau rồi khởi động lại cả hai."
+            ;;
+        *)
+            fail "/events trả HTTP ${CODE:-rỗng}" \
+                 "Request tới bridge bị từ chối trước cả bước kiểm token. Kiểm tra ZALO_BRIDGE_TOKEN có ký tự lạ (\\r, khoảng trắng) không."
+            ;;
+    esac
 else
     logger -t zalo-bridge "WARN: ZALO_BRIDGE_TOKEN chưa đặt; không phát hiện được token drift"
 fi
@@ -105,7 +138,16 @@ ODOO_DB="$(envval ODOO_DB)"
 ODOO_USER="$(envval ODOO_USERNAME)"
 ODOO_KEY="$(envval ODOO_API_KEY)"
 # Profile configs carry the credential inline; fall back to the profile file.
-PROFILE_CFG="${ZALO_PROFILE_CONFIG:-$HERMES_HOME/profiles/zalo-bot/config.yaml}"
+# HERMES_HOME is usually ALREADY the profile home (.../profiles/zalo-bot), in
+# which case appending profiles/zalo-bot again silently finds nothing and the
+# Odoo check is skipped without saying so.
+if [ -n "${ZALO_PROFILE_CONFIG:-}" ]; then
+    PROFILE_CFG="$ZALO_PROFILE_CONFIG"
+elif [ -f "$HERMES_HOME/config.yaml" ]; then
+    PROFILE_CFG="$HERMES_HOME/config.yaml"
+else
+    PROFILE_CFG="$HERMES_HOME/profiles/zalo-bot/config.yaml"
+fi
 if [ -z "$ODOO_URL" ] && [ -f "$PROFILE_CFG" ]; then
     # Split on the FIRST colon only — the value itself contains one
     # ("https://..."), and a greedy match silently produces "//host".

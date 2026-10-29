@@ -1,4 +1,14 @@
-# Gateway process bound to the zalo-bot profile.
+# Gateway process bound to the zalo-bot profile -- the `systemctl --user`
+# variant, for a shared or desktop machine where the bot runs as a login user.
+#
+# FOR A DEDICATED SERVER, USE deploy/migrate/systemd/ INSTEAD. Those are
+# SYSTEM units and they are what the migration installs. A user unit needs
+# `loginctl enable-linger` or it stops with the last login session and never
+# comes back at boot. They also set StartLimitIntervalSec=0, which this one
+# does not: systemd otherwise gives up after 5 restarts in 10 seconds.
+#
+# Two unit files for one job is a drift risk, so: this file is the fallback,
+# deploy/migrate/systemd/ is production. Change both or neither.
 #
 # A gateway serves exactly one profile, resolved from HERMES_HOME at startup.
 # HERMES_HOME whose immediate parent is named "profiles" selects that profile;

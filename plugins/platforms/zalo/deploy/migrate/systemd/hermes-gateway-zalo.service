@@ -1,0 +1,39 @@
+# The Hermes gateway bound to the zalo-bot profile.
+#
+# A gateway serves exactly one profile, resolved from HERMES_HOME at startup.
+# HERMES_HOME whose immediate parent is named "profiles" selects that profile;
+# pointing it at the hermes root runs the DEFAULT profile instead -- and the
+# wrong profile fails silently, with the bot answering from an empty SOUL and
+# no Odoo tools.
+
+[Unit]
+Description=Hermes Gateway (zalo-bot profile, Odoo support bot)
+After=network-online.target hermes-zalo-bridge.service
+Wants=network-online.target
+# The bridge is deliberately NOT a hard dependency: the adapter can attach
+# later, and a bridge that is briefly down must not stop the gateway.
+#
+# StartLimitIntervalSec=0 disables systemd's give-up-after-5-tries default.
+# This deployment has already lost 4 days to a restart policy that was
+# configured, looked correct in the XML, and never fired.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__AGENT_DIR__
+Environment="HERMES_HOME=__PROFILE_HOME__"
+# uv's tool shims and the venv are NOT on a service's default PATH. Without
+# them the Odoo MCP server never starts, and the bot answers business
+# questions out of thin air instead of reporting a broken tool.
+Environment="PATH=__AGENT_DIR__/venv/bin:__HOME__/.local/bin:__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin"
+ExecStart=__AGENT_DIR__/venv/bin/python -m hermes_cli.main gateway run
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

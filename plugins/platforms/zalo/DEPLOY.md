@@ -127,6 +127,13 @@ Under `$HERMES_HOME/zalo/`:
 
 Back these up before any migration. `.health-state` is disposable.
 
+Moving the whole bot to another host — including Windows to Linux — is a
+runbook of its own: **`deploy/migrate/MIGRATE.md`**. It bundles this state,
+rebuilds the runtime at the pinned commit, rewrites the host-specific paths,
+installs the systemd units and runs a behaviour gate. The part it cannot
+promise is `session.json`: Zalo may revoke a session that appears from a new
+IP, so have the bot's phone in the room.
+
 ### State that must NOT survive a rules change
 
 Conversation history is the opposite case: after editing `SOUL.snippet.md`,

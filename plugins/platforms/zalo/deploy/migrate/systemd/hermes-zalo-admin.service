@@ -1,0 +1,31 @@
+# The admin panel (allowlist, model choice, QR re-login), behind Caddy.
+#
+# On Windows this could not restart itself: the launcher held port 8648 via a
+# detached child, so /End killed the wrapper and /Run could not bind. systemd
+# owns the python process directly, so `systemctl restart` just works -- the
+# panel's own restart button is for the GATEWAY, not for itself.
+
+[Unit]
+Description=Hermes Zalo admin panel (127.0.0.1:8648)
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__AGENT_DIR__/plugins/platforms/zalo/admin
+Environment="HERMES_HOME=__PROFILE_HOME__"
+Environment="ZALO_GATEWAY_UNIT=hermes-gateway-zalo"
+Environment="PATH=__AGENT_DIR__/venv/bin:/usr/local/bin:/usr/bin:/bin"
+# Bind to loopback only; Caddy terminates TLS and is the single public door.
+ExecStart=__AGENT_DIR__/venv/bin/python server.py --host 127.0.0.1 --port 8648
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=append:__PROFILE_HOME__/logs/admin.log
+StandardError=append:__PROFILE_HOME__/logs/admin.err.log
+
+[Install]
+WantedBy=multi-user.target

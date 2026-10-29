@@ -1,0 +1,45 @@
+# The Zalo bridge, supervised in its own right.
+#
+# WHY IT IS A SEPARATE UNIT AND NOT A CHILD OF THE GATEWAY
+#
+# On Windows the bridge was a detached process that outlived gateway
+# restarts, so the adapter's connect() took the *attach* path -- which
+# DEPLOY.md records as the common path in production. Under systemd's default
+# KillMode=control-group, a bridge spawned by the gateway dies with it, and
+# every gateway restart (model change, config edit, deploy, crash) becomes a
+# fresh Zalo cookie login. Zalo kicks accounts that re-login often, so that
+# would turn routine restarts into an account risk.
+#
+# Keeping it separate preserves the attach path and lets systemd supervise
+# the bridge for what it is: the long-lived half.
+#
+# The adapter can still spawn one as a backstop. It probes /health and adopts
+# a live bridge before spawning, so the two do not fight over the account.
+
+[Unit]
+Description=Hermes Zalo bridge (zca-js, loopback 8647)
+After=network-online.target
+Wants=network-online.target
+# No StartLimit: a bridge that keeps failing must keep being retried, not be
+# given up on. The Windows watchdog gave up and the bot was dead for 4 days.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__AGENT_DIR__/plugins/platforms/zalo/bridge
+Environment="HERMES_ROOT=__HERMES_ROOT__"
+Environment="PROFILE_HOME=__PROFILE_HOME__"
+Environment="BRIDGE_DIR=__AGENT_DIR__/plugins/platforms/zalo/bridge"
+Environment="PATH=__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin"
+ExecStart=__MIGRATE_DIR__/run-bridge.sh
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=append:__PROFILE_HOME__/logs/bridge.log
+StandardError=append:__PROFILE_HOME__/logs/bridge.err.log
+
+[Install]
+WantedBy=multi-user.target

@@ -170,6 +170,9 @@ MODEL_CHOICES: List[Dict[str, Any]] = [
     },
 ]
 GATEWAY_TASK = os.environ.get("ZALO_GATEWAY_TASK", "HermesZaloGateway")
+# Linux: the systemd unit this panel is allowed to restart. install-services.sh
+# writes a sudoers drop-in scoped to exactly `systemctl restart <this unit>`.
+GATEWAY_UNIT = os.environ.get("ZALO_GATEWAY_UNIT", "hermes-gateway-zalo")
 
 
 def profile_config() -> Path:
@@ -895,18 +898,48 @@ async def api_model_set(request: Request, payload: Dict[str, Any] = Body(...)):
 async def api_gateway_restart(request: Request):
     """Khởi động lại gateway để model vừa chọn có hiệu lực.
 
-    Dùng schtasks /End rồi /Run, KHÔNG diệt tiến trình theo tên: trang quản trị
-    cũng là một python.exe, diệt theo tên là tự giết chính nó. /End kết thúc
-    instance của task; nếu tiến trình con tách rời còn sống thì cờ --replace
-    trong run-gateway.ps1 sẽ để bản mới chiếm chỗ bản cũ.
+    Windows: schtasks /End rồi /Run, KHÔNG diệt tiến trình theo tên — trang
+    quản trị cũng là một python.exe, diệt theo tên là tự giết chính nó. /End
+    kết thúc instance của task; nếu tiến trình con tách rời còn sống thì cờ
+    --replace trong run-gateway.ps1 sẽ để bản mới chiếm chỗ bản cũ.
+
+    Linux: `systemctl restart <unit>` làm đúng việc đó một lệnh, nhưng panel
+    chạy không đặc quyền nên phải qua `sudo -n`. deploy/migrate/
+    install-services.sh cấp quyền cho ĐÚNG một lệnh trên ĐÚNG một unit, nên
+    nếu panel bị chiếm thì kẻ tấn công chỉ restart được con bot.
     """
     if r := deny(request):
         return r
     if not csrf_ok(request):
         return JSONResponse({"error": "CSRF token không hợp lệ"}, status_code=403)
+
     if sys.platform != "win32":
-        return JSONResponse(
-            {"error": "Chỉ hỗ trợ trên Windows (Task Scheduler)"}, status_code=400)
+        # sudo -n: thà báo lỗi ngay còn hơn treo request chờ nhập mật khẩu
+        # trên một tiến trình không có terminal.
+        cmd = ["systemctl", "restart", GATEWAY_UNIT]
+        if os.geteuid() != 0:
+            cmd = ["sudo", "-n"] + cmd
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as exc:
+            return JSONResponse(
+                {"error": "Không gọi được systemctl: " + str(exc)}, status_code=500)
+        if run.returncode != 0:
+            detail = (run.stderr or run.stdout or "").strip()[:200]
+            hint = ""
+            if "password" in detail.lower() or "sudo" in detail.lower():
+                hint = (" — thiếu quyền sudo. Cài lại bằng "
+                        "deploy/migrate/install-services.sh")
+            return JSONResponse(
+                {"error": "systemctl restart thất bại: " + detail + hint},
+                status_code=500)
+        return {
+            "ok": True,
+            "unit": GATEWAY_UNIT,
+            "hint": "Gateway đang khởi động lại. Ô “đang chạy” chỉ cập "
+                    "nhật sau lượt chat kế tiếp.",
+        }
+
     try:
         subprocess.run(["schtasks", "/End", "/TN", GATEWAY_TASK],
                        capture_output=True, timeout=30)

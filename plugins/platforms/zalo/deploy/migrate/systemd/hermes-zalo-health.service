@@ -1,0 +1,18 @@
+[Unit]
+Description=Zalo bot health check (bridge, login, token, Odoo key)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__GROUP__
+Environment="HERMES_HOME=__PROFILE_HOME__"
+Environment="ZALO_GATEWAY_UNIT=hermes-gateway-zalo"
+Environment="ZALO_BRIDGE_UNIT=hermes-zalo-bridge"
+Environment="ZALO_PROFILE_CONFIG=__PROFILE_HOME__/config.yaml"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+ExecStart=__AGENT_DIR__/plugins/platforms/zalo/deploy/zalo-health.sh
+# A failing check is information, not a unit failure to be restarted.
+SuccessExitStatus=0 1
+StandardOutput=append:__PROFILE_HOME__/logs/zalo-health.log
+StandardError=append:__PROFILE_HOME__/logs/zalo-health.log
