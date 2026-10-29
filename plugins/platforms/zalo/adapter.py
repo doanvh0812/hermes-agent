@@ -101,6 +101,12 @@ DEFAULT_BRIDGE_PORT = 8647
 HEALTH_TIMEOUT_SECONDS = 30.0
 POLL_INTERVAL_SECONDS = 0.5
 POLL_ERROR_BACKOFF_SECONDS = 3.0
+# A dead bridge used to mean indefinite silent retry (see _recover_bridge).
+# Wait this long before believing the bridge is really gone rather than
+# briefly busy, then retry no more often than this -- Zalo kicks accounts
+# that re-login frequently, so respawning must stay rare.
+BRIDGE_UNREACHABLE_GRACE_SECONDS = 60.0
+BRIDGE_RECOVER_MIN_INTERVAL = 300.0
 NPM_INSTALL_TIMEOUT_SECONDS = 300
 
 # Conservative Zalo text limits (no hard published cap; ~2000 observed).
@@ -739,6 +745,12 @@ class ZaloAdapter(BasePlatformAdapter):
         self._client: Optional[_ZaloBridgeClient] = None
         self._process: Optional[Any] = None  # asyncio subproces handle
         self._spawned = False  # True only when THIS adapter started the bridge
+        # Bridge-liveness bookkeeping for _recover_bridge(). _poll_fail_since
+        # is None while polling is healthy; it marks the FIRST failure of the
+        # current outage so the grace window measures the outage, not the gap
+        # between two retries.
+        self._poll_fail_since: Optional[float] = None
+        self._last_recover_at = 0.0
         self._poll_task: Optional[asyncio.Task] = None
         self._event_cursor = 0
         self._lock_key: Optional[str] = None
@@ -850,6 +862,55 @@ class ZaloAdapter(BasePlatformAdapter):
             )
             return True
 
+        ok, _code, _detail = await self._spawn_bridge(bridge_token)
+        if not ok:
+            self._release_lock()
+            self._set_fatal_error(_code, _detail, retryable=_code != "missing_dep")
+            return False
+
+        self._spawned = True
+        self._mark_connected()
+
+        # own_id drives group mention-gating; the bridge exposes it on /health.
+        try:
+            health = await self._client.health()
+            self._own_id = str(health.get("own_id") or "")
+        except Exception:
+            self._own_id = ""
+        if not self._own_id:
+            logger.warning(
+                "Zalo: own_id is empty — group mention-gating will drop every "
+                "group message. Check the bridge /health endpoint."
+            )
+
+        await self._refresh_friends()
+        self._friend_task = asyncio.create_task(self._friend_refresh_loop())
+        self._sync_gateway_allowlist()
+
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        logger.info(
+            "Zalo personal adapter: bridge ready on 127.0.0.1:%s (session %s)",
+            self.bridge_port,
+            self._session_path.name,
+        )
+        return True
+
+    async def _spawn_bridge(self, bridge_token: str) -> Tuple[bool, str, str]:
+        """Start the node bridge and wait for /health.
+
+        Extracted from ``connect()`` so the poll loop's recovery path spawns
+        through the SAME code instead of a second copy — two spawn paths drift,
+        and the one that drifts is always the one nobody exercises.
+
+        Returns ``(ok, error_code, detail)``. Deliberately does NOT release the
+        scoped lock or set a fatal error: ``connect()`` owns those decisions on
+        a cold start, while recovery legitimately holds the lock and must keep
+        retrying rather than latch a fatal state.
+        """
+        node_bin = shutil.which("node")
+        if not node_bin:
+            return False, "missing_dep", "Node.js >= 18 is required"
+
         bridge_dir = resolve_bridge_dir()
         node_modules = bridge_dir / "node_modules" / "zca-js"
         if not node_modules.exists():
@@ -873,13 +934,8 @@ class ZaloAdapter(BasePlatformAdapter):
                         (stderr or b"").decode(errors="replace").strip()[:400]
                     )
             except Exception as exc:
-                self._release_lock()
-                self._set_fatal_error(
-                    "npm_install_failed",
-                    f"Could not install Zalo bridge dependencies: {exc}",
-                    retryable=True,
-                )
-                return False
+                return (False, "npm_install_failed",
+                        f"Could not install Zalo bridge dependencies: {exc}")
 
         # Per-spawn env: the derived token lets any same-session process
         # authenticate; the bridge falls back to deriving it identically.
@@ -908,11 +964,7 @@ class ZaloAdapter(BasePlatformAdapter):
                 stderr=bridge_log,
             )
         except Exception as exc:
-            self._release_lock()
-            self._set_fatal_error(
-                "spawn_failed", f"Could not spawn Zalo bridge: {exc}", retryable=True
-            )
-            return False
+            return False, "spawn_failed", f"Could not spawn Zalo bridge: {exc}"
 
         self._client = _ZaloBridgeClient(self.bridge_port, bridge_token)
         if not await _wait_for_health(self._client, HEALTH_TIMEOUT_SECONDS,
@@ -924,40 +976,80 @@ class ZaloAdapter(BasePlatformAdapter):
             except OSError:
                 pass
             await self._terminate_bridge()
-            self._release_lock()
             self._client = None
-            self._set_fatal_error(
-                "bridge_unready",
-                "Zalo bridge did not become ready in time."
-                + (f" Last output: {stderr_tail.strip()[:300]}" if stderr_tail else ""),
-                retryable=True,
+            return (False, "bridge_unready",
+                    "Zalo bridge did not become ready in time."
+                    + (f" Last output: {stderr_tail.strip()[:300]}"
+                       if stderr_tail else ""))
+
+        return True, "", ""
+
+    async def _recover_bridge(self) -> bool:
+        """Re-attach to, or respawn, a bridge that stopped answering.
+
+        WHY THIS EXISTS: the bridge died 2026-10-28 ~17:00 and the gateway kept
+        running for 25 hours without it. ``_poll_loop`` swallowed every failure
+        at debug level and retried forever, so nothing in the logs at INFO even
+        said the bridge was gone — only the 15-minute friend-refresh warning,
+        which does not respawn anything either. A dead bridge meant the bot was
+        simply silent until a human noticed.
+
+        Rate-limited on purpose. Zalo kicks accounts that re-login frequently,
+        which is the whole reason for the attach-on-restart model, so this tries
+        at most once per ``BRIDGE_RECOVER_MIN_INTERVAL`` and always re-checks
+        /health first: if a bridge is alive (someone started one by hand, or a
+        slow one finally came up) it re-attaches instead of spawning a rival.
+        """
+        now = time.monotonic()
+        if now - self._last_recover_at < BRIDGE_RECOVER_MIN_INTERVAL:
+            return False
+        self._last_recover_at = now
+
+        bridge_token = bridge_token_for_session(self._session_path)
+        probe = _ZaloBridgeClient(self.bridge_port, bridge_token)
+        try:
+            existing = await probe.health()
+        except Exception:
+            existing = {}
+        if existing.get("ready"):
+            # Someone else's bridge is serving the port. Adopt it rather than
+            # spawning a second login on the same account.
+            self._client = probe
+            self._spawned = False
+            self._own_id = str(existing.get("own_id") or "") or self._own_id
+            logger.info(
+                "Zalo: bridge answered again on 127.0.0.1:%s; re-attached "
+                "without respawning", self.bridge_port,
             )
+            return True
+
+        logger.warning(
+            "Zalo: bridge on 127.0.0.1:%s has been unreachable for %.0fs — "
+            "respawning it", self.bridge_port,
+            now - (self._poll_fail_since or now),
+        )
+        # A handle we spawned earlier is dead; drop it so the new process owns
+        # the field and _terminate_bridge() cannot reap the wrong pid.
+        if self._spawned:
+            await self._terminate_bridge()
+        self._process = None
+
+        ok, code, detail = await self._spawn_bridge(bridge_token)
+        if not ok:
+            logger.error("Zalo: bridge respawn failed (%s): %s", code, detail)
             return False
 
         self._spawned = True
-        self._mark_connected()
-
-        # own_id drives group mention-gating; the bridge exposes it on /health.
         try:
             health = await self._client.health()
-            self._own_id = str(health.get("own_id") or "")
+            self._own_id = str(health.get("own_id") or "") or self._own_id
         except Exception:
-            self._own_id = ""
-        if not self._own_id:
-            logger.warning(
-                "Zalo: own_id is empty — group mention-gating will drop every "
-                "group message. Check the bridge /health endpoint."
-            )
-
+            pass
         await self._refresh_friends()
-        self._friend_task = asyncio.create_task(self._friend_refresh_loop())
         self._sync_gateway_allowlist()
-
-        self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "Zalo personal adapter: bridge ready on 127.0.0.1:%s (session %s)",
-            self.bridge_port,
-            self._session_path.name,
+            "Zalo: bridge respawned and ready on 127.0.0.1:%s (session %s)",
+            self.bridge_port, self._session_path.name,
         )
         return True
 
@@ -1819,11 +1911,33 @@ class ZaloAdapter(BasePlatformAdapter):
                 if cursor > self._event_cursor:
                     self._event_cursor = cursor
                     self._save_dedup_state()
+                if self._poll_fail_since is not None:
+                    logger.info(
+                        "Zalo: event polling recovered after %.0fs",
+                        time.monotonic() - self._poll_fail_since,
+                    )
+                    self._poll_fail_since = None
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.debug("Zalo poll failed: %s", exc)
+                now = time.monotonic()
+                if self._poll_fail_since is None:
+                    self._poll_fail_since = now
+                    # WARNING, not debug: the 2026-10-28 outage ran 25 hours and
+                    # the only INFO-level trace was the 15-minute friend-refresh
+                    # warning. The first failure of an outage has to be visible
+                    # at the level the deployment actually logs at.
+                    logger.warning("Zalo: event polling failed: %s", exc)
+                else:
+                    logger.debug("Zalo poll still failing: %s", exc)
+                if now - self._poll_fail_since >= BRIDGE_UNREACHABLE_GRACE_SECONDS:
+                    try:
+                        await self._recover_bridge()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Zalo: bridge recovery attempt failed")
                 await asyncio.sleep(POLL_ERROR_BACKOFF_SECONDS)
 
     async def _handle_bridge_event(self, evt: Dict[str, Any]) -> None:
