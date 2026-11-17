@@ -27,9 +27,15 @@ Usage:
 With no --chat it resolves the chat id from getUpdates: send the bot any
 message first (press Start in the chat), then run this.
 
-Pure stdlib, ASCII output: it runs under whatever interpreter the host has,
-and a Windows console on cp1252 renders non-ASCII as '?'. Same constraint as
-check-mcp-tools.py next door.
+Pure stdlib, and its own strings are ASCII: it runs under whatever interpreter
+the host has, and a Windows console on cp1252 renders non-ASCII as '?'. Same
+constraint as check-mcp-tools.py next door.
+
+That is not enough on its own, though -- the strings Telegram hands back are
+not ours. A bot named in Vietnamese crashed this script outright on the
+cp1252 console (UnicodeEncodeError on the '@name (First Last)' line), so
+stdout is reconfigured below to degrade such characters instead. A setup run
+must not die over how a bot chose to spell its own name.
 """
 
 import argparse
@@ -50,6 +56,16 @@ from datetime import datetime
 API_BASE = os.environ.get("ZALO_ALERT_TG_API", "https://api.telegram.org")
 KEY_TOKEN = "ZALO_ALERT_TG_TOKEN"
 KEY_CHAT = "ZALO_ALERT_TG_CHAT"
+
+# Bot names, chat titles and Telegram's own error descriptions can hold any
+# script; this console is cp1252. Degrade what it cannot represent rather than
+# raising UnicodeEncodeError in the middle of a setup run. Only affects what
+# is PRINTED -- the values written to .env and sent to Telegram are untouched.
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
 
 
 def mask(secret):
@@ -186,7 +202,11 @@ def write_env(path, raw, eol, pairs, dry_run):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--token", required=True, help="bot token from @BotFather")
+    # Not required: with --token omitted the token is read from stdin, which
+    # keeps it out of shell history and out of the process table, where
+    # anything on the box can read a command line.
+    ap.add_argument("--token", help="bot token from @BotFather; omit to pipe "
+                                    "it on stdin instead")
     ap.add_argument("--chat", help="chat id; default: resolved from getUpdates")
     ap.add_argument("--env", help="profile .env; default: $HERMES_HOME/.env")
     ap.add_argument("--dry-run", action="store_true",
@@ -197,7 +217,10 @@ def main():
                          "is the only proof the channel works)")
     args = ap.parse_args()
 
-    token = args.token.strip()
+    token = (args.token or sys.stdin.readline()).strip()
+    if not token:
+        print("FAIL: no token (pass --token, or pipe it on stdin)")
+        return 1
     env_path = args.env or os.path.join(
         os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env")
 
