@@ -126,9 +126,25 @@ def resolve_chat(token):
                 found.append((upd.get("update_id", 0), chat))
                 break
     if not found:
-        return None, ("no chat has messaged this bot yet -- open the bot in "
-                      "Telegram, press Start (or send any message), then "
-                      "re-run this")
+        # An empty queue has two causes and only one is fixed by messaging the
+        # bot, so report both rather than sending someone to press Start when
+        # that can never work. Measured 2026-11-17: a second Hermes was
+        # long-polling this token and took the /start update first, leaving
+        # this short poll a legitimately empty list -- no error, no hint.
+        #
+        # Deliberately NOT probed with a long poll to tell the two apart. That
+        # does identify it (Telegram answers 409 "terminated by other
+        # getUpdates request"), but the way it finds out is by TERMINATING the
+        # other instance's in-flight poll -- breaking someone's assistant to
+        # produce a diagnostic message is not a trade worth making.
+        return None, (
+            "no chat id could be discovered. Either no chat has messaged this "
+            "bot yet -- open it in Telegram, press Start, and re-run -- or "
+            "another instance is already polling this token and consumed the "
+            "update first. If you run a bot on this token elsewhere, that is "
+            "the case: sending alerts through it still works, but the chat id "
+            "has to come from you (--chat <id>), or use a bot dedicated to "
+            "alerts")
     found.sort(key=lambda p: p[0])
     return found[-1][1], None
 
