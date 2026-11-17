@@ -687,6 +687,7 @@ neither substitutes for backend authorization.
 | `deploy/odoo-mcp/instructions.txt` | `$HERMES_HOME/odoo-mcp/` | Server-level MCP instructions |
 | `deploy/zalo-health.sh` | anywhere on PATH | Bridge health, token drift, Odoo key, and whether the gateway actually registered its MCP tools |
 | `deploy/check-mcp-tools.py` | beside `zalo-health.sh` | Reads the gateway's own log to prove it holds its MCP tools — a live credential does not |
+| `deploy/setup-telegram.py` | run once | Points the health check's alerts at Telegram and proves delivery with a real test message |
 | `deploy/logrotate.conf` | user cron | Log rotation |
 | `deploy/patches/fix-execute-method-field-acl.py` | run after enabling `execute_method` | Makes `execute_method` obey the allowlist so it cannot bypass the field ACL |
 
@@ -1318,17 +1319,58 @@ rapid questions consumes the budget for everyone, turning a protection into
 a denial-of-service vector. A per-`zalo_user_id` limit belongs in the
 adapter, with the MCP limit kept as a lower backstop.
 
-### 9. ~~Alerts go to syslog only~~ — done
+### 9. ~~Alerts go to syslog only~~ — done 2026-11-17
 
-`zalo-health.sh` now sends to Telegram (and still logs to syslog). Telegram
-is chosen deliberately: it is a different transport from the one being
-monitored, so a dead Zalo cannot swallow the alert about itself.
+This was marked done once before, on the strength of `zalo-health.sh`
+containing a `notify()` that speaks Telegram. That was not the same thing as
+alerts reaching anyone, and the distinction cost four days of silent outage:
 
-It reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_HOME_CHANNEL` from `.env`, or
-`ZALO_ALERT_TG_TOKEN` / `ZALO_ALERT_TG_CHAT` to send somewhere else. With
-neither configured it falls back to `logger` alone.
+- no token was ever configured, so the Telegram branch **had never executed
+  once**. "The code is written" is not evidence that a delivery path works.
+- that unexercised branch passed the message with `curl -d`, which sends data
+  verbatim — a reason containing `&` or `+` would have been truncated or
+  altered by form decoding. Now `--data-urlencode`.
+- the Windows host — the one actually in production — runs
+  `zalo-health.ps1`, which had no Telegram path at all, only a file log and
+  an Event Log entry, plus a `TODO` pointing at ntfy.
 
-Four conditions are checked, each invisible by other means:
+Both scripts now deliver, and the channel is configured with:
+
+```bash
+python deploy/setup-telegram.py --token <from @BotFather>
+```
+
+which validates the token, resolves the chat id from `getUpdates`, writes
+`ZALO_ALERT_TG_TOKEN` / `ZALO_ALERT_TG_CHAT` into the profile `.env`, and
+sends a real test message. The test is the point: it is the only thing that
+distinguishes this from the previous "done".
+
+Prefer the `ZALO_ALERT_TG_*` names. `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_HOME_CHANNEL` are still read as a fallback, but the gateway reads
+this same `.env` for **platform** credentials, so a `TELEGRAM_BOT_TOKEN`
+sitting in the profile is one `platforms.telegram.enabled` away from the bot
+quietly connecting to Telegram as a second chat surface.
+
+`ZALO_ALERT_TG_API` repoints both scripts at a local listener, so the
+delivery path can be exercised end-to-end without a live token. It is how the
+encoding below was verified.
+
+Two platform traps, both measured rather than assumed:
+
+- **PowerShell 5.1 picks a script's encoding by BOM alone.** With no BOM it
+  reads `zalo-health.ps1` as the system ANSI codepage (Windows-1252 here),
+  which turns `🔴 Zalo bot DOWN —` into `ðŸ”´ Zalo bot DOWN â€”` in the
+  delivered alert — and a stray byte can break the parse outright. The BOM on
+  that file is load-bearing content; see `deploy/.gitattributes`.
+- **A form-encoded hashtable body mangles non-ASCII under 5.1.** The alert
+  text is Vietnamese, so `Send-Telegram` hands Telegram explicit UTF-8 JSON
+  bytes with `-ContentType 'application/json; charset=utf-8'`.
+- `SecurityProtocol` is deliberately left at `SystemDefault`: measured on the
+  deploy box, `api.telegram.org` answers 200 without touching it, so the
+  customary `= Tls12` line would fix nothing and would *cap* a host that
+  already negotiates TLS 1.3.
+
+Six conditions are checked, each invisible by other means:
 
 | Check | Why it matters |
 |---|---|
@@ -1337,6 +1379,7 @@ Four conditions are checked, each invisible by other means:
 | `ready: true` | the cookie expired — needs a QR re-login |
 | token accepted | token drift; `/send` still works so it looks healthy |
 | Odoo authenticates | an API key is revoked by a password change or deleted from the profile; the bot keeps answering and just says it cannot look anything up, which reads like a data problem |
+| MCP tools registered | discovery runs once at startup and a failed connect is never retried; the gateway answers normally with zero Odoo tools, and every other indicator stays green |
 
 Alerts fire on the **transition** into failure, not every run — a bridge that
 stays broken must not page every ten minutes, which only teaches people to

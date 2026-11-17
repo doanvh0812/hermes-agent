@@ -7,3 +7,11 @@
 *.conf    text eol=lf
 *.sh      text eol=lf
 *.py     text eol=lf
+# zalo-health.ps1 carries Vietnamese and emoji in its alert text, and Windows
+# PowerShell 5.1 decides a script's encoding by BOM alone: with no BOM it reads
+# the file as the system ANSI codepage (Windows-1252 on the deploy box), which
+# turns "🔴 Zalo bot DOWN —" into "ðŸ”´ Zalo bot DOWN â€”" in the delivered
+# alert. The BOM is therefore load-bearing content -- git leaves it alone, but
+# any redeploy that rewrites this file must keep it (Set-Content -Encoding utf8
+# in PS 5.1 writes one; PS 7+ needs utf8BOM).
+*.ps1    text eol=crlf

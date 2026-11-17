@@ -12,7 +12,10 @@
 #
 # Alerts go to Telegram, deliberately: it is a different transport from the
 # one being monitored, so a dead Zalo cannot swallow the notification about
-# itself. Falls back to `logger` when Telegram is not configured.
+# itself. Falls back to `logger` when Telegram is not configured -- which is
+# NOT monitoring (gap #9 in DEPLOY.md): a log file on the broken box is read
+# only by someone who already knows something is wrong. Configure it with
+# `deploy/setup-telegram.py --token <from @BotFather>`.
 set -uo pipefail
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -44,13 +47,25 @@ TG_TOKEN="${ZALO_ALERT_TG_TOKEN:-$(envval TELEGRAM_BOT_TOKEN)}"
 TG_CHAT="${ZALO_ALERT_TG_CHAT:-$(envval TELEGRAM_HOME_CHANNEL)}"
 
 notify() {
-    local text="$1"
+    # Name the host: during the Windows -> Linux cutover both boxes can be
+    # alive and alerting into the SAME chat, and an alert you cannot attribute
+    # to a machine is an alert you cannot act on.
+    local text="$1
+Host: $(hostname 2>/dev/null || echo unknown)"
     logger -t zalo-bridge "$text"
     if [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ]; then
+        # --data-urlencode for the text, NOT -d: curl sends -d data verbatim,
+        # so a reason containing & or + would be truncated or silently altered
+        # by form decoding on the way in. These strings are multi-line and
+        # carry remediation commands, so they get encoded properly.
+        # ZALO_ALERT_TG_API redirects at a local listener so this path can be
+        # exercised without a live token. It had never run once before
+        # 2026-11-17 -- no token was ever configured -- so "it is written" was
+        # not evidence it worked. Same override exists in zalo-health.ps1.
         curl -sf --max-time 10 \
-            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            "${ZALO_ALERT_TG_API:-https://api.telegram.org}/bot${TG_TOKEN}/sendMessage" \
             -d "chat_id=${TG_CHAT}" \
-            -d "text=${text}" \
+            --data-urlencode "text=${text}" \
             -d "disable_notification=false" >/dev/null 2>&1 \
             || logger -t zalo-bridge "WARN: Telegram alert delivery failed"
     fi

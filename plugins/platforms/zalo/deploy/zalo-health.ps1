@@ -1,9 +1,11 @@
-# Zalo bridge health check - Windows port of deploy/zalo-health.sh
+﻿# Zalo bridge health check - Windows port of deploy/zalo-health.sh
 #
-# Catches BOTH silent failure modes, neither of which surfaces anywhere else
-# (the gateway keeps reporting "connected" through both):
+# Catches the silent failure modes, none of which surfaces anywhere else (the
+# gateway keeps reporting "connected" through every one of them):
+#   0. gateway task dead / pid gone -> nothing polls the bridge
 #   1. bridge dead / not logged in  -> /health not ready
 #   2. bridge token drift           -> /events returns "bad bridge token"
+#   2b. gateway holds no MCP tools  -> answers without any Odoo lookup
 #
 # Scheduled every 10 minutes by ops\register-tasks.ps1.
 #
@@ -12,6 +14,12 @@
 #     event log under source "ZaloBridge" plus a plain-text log file.
 #   - Alerts fire only on TRANSITION into failure, same as the original, so a
 #     bridge that stays broken does not emit a line every 10 minutes forever.
+#
+# Alerts also go to Telegram when ZALO_ALERT_TG_TOKEN + ZALO_ALERT_TG_CHAT are
+# set in the profile .env (deploy/setup-telegram.py writes them). Telegram is
+# a DIFFERENT transport from the one being monitored, so a dead Zalo cannot
+# swallow the notification about itself -- which a log file on the broken box
+# effectively does.
 
 $ErrorActionPreference = 'Stop'
 
@@ -29,14 +37,62 @@ function Get-EnvValue([string]$Name) {
     if (-not $line) { return $null }
     $v = ($line.Line -split '=', 2)[1]
     if ([string]::IsNullOrWhiteSpace($v)) { return $null }
-    return $v.Trim()
+    # .Trim() also drops the trailing \r of a CRLF .env, which this file has.
+    # The quote strip matches zalo-health.sh's envval(); every value in the
+    # live .env is unquoted today, so this changes nothing now and stops a
+    # hand-edited KEY="value" from sending quotes into an HTTP header later.
+    return $v.Trim().Trim('"').Trim("'")
 }
 
 $Port  = Get-EnvValue 'ZALO_BRIDGE_PORT'; if (-not $Port) { $Port = '8647' }
 $Token = Get-EnvValue 'ZALO_BRIDGE_TOKEN'
 
+# Alert channel. ZALO_ALERT_TG_* is canonical; TELEGRAM_* is accepted only for
+# parity with zalo-health.sh, which has always read both. Prefer the
+# ZALO_ALERT_* names: the gateway reads this same .env for PLATFORM
+# credentials, and a TELEGRAM_BOT_TOKEN here is one `platforms.telegram.enabled`
+# away from the bot quietly connecting to Telegram as a second chat surface.
+$TgToken = Get-EnvValue 'ZALO_ALERT_TG_TOKEN'
+if (-not $TgToken) { $TgToken = Get-EnvValue 'TELEGRAM_BOT_TOKEN' }
+$TgChat  = Get-EnvValue 'ZALO_ALERT_TG_CHAT'
+if (-not $TgChat)  { $TgChat  = Get-EnvValue 'TELEGRAM_HOME_CHANNEL' }
+
 New-Item -ItemType Directory -Force -Path (Split-Path $StateFile) | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path $LogFile)   | Out-Null
+
+function Send-Telegram([string]$Text) {
+    if (-not $TgToken -or -not $TgChat) { return 'not configured' }
+    # A form-encoded hashtable body mangles non-ASCII under PowerShell 5.1, and
+    # these messages are Vietnamese. Hand Telegram explicit UTF-8 JSON bytes
+    # instead -- the one shape that survives 5.1 intact.
+    #
+    # SecurityProtocol is deliberately left alone. Measured on this host:
+    # api.telegram.org answers 200 under SystemDefault, so the usual
+    # `= [Net.SecurityProtocolType]::Tls12` line would not fix anything and
+    # would CAP a box that already negotiates TLS 1.3.
+    # ZALO_ALERT_TG_API redirects the call at a local listener so the delivery
+    # path can be exercised without a live token -- the encoding above is the
+    # part that silently breaks, so it needs to be testable. Same override
+    # exists in zalo-health.sh.
+    $api = if ($env:ZALO_ALERT_TG_API) { $env:ZALO_ALERT_TG_API } else { 'https://api.telegram.org' }
+    # The here-strings below live in a CRLF file, so they carry \r\n. Telegram
+    # renders the \r as nothing, but send what was meant rather than relying on
+    # that.
+    $Text = $Text -replace "`r`n", "`n"
+    try {
+        $json  = @{ chat_id = $TgChat; text = $Text } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $null  = Invoke-RestMethod -Method Post -TimeoutSec 15 `
+                     -Uri "$api/bot$TgToken/sendMessage" `
+                     -ContentType 'application/json; charset=utf-8' -Body $bytes
+        return 'sent'
+    } catch {
+        # The notifier must never take the check down: $ErrorActionPreference
+        # is 'Stop' at the top of this file, and Write-Alert is called from
+        # Fail() which still has to reach its `exit 1`.
+        return "failed: $($_.Exception.Message)"
+    }
+}
 
 function Write-Alert([string]$Level, [string]$Message) {
     $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -52,9 +108,28 @@ function Write-Alert([string]$Level, [string]$Message) {
         # Event log needs an elevated first write to create the source. The
         # file log above still captured it, so do not fail the check.
     }
-    # TODO: route somewhere a person actually sees. Known gap #9 in DEPLOY.md:
-    # an alert nobody reads is not monitoring. e.g.
-    #   Invoke-RestMethod -Method Post -Uri 'https://ntfy.sh/<topic>' -Body $Message
+
+    # Telegram carries ALERT and RECOVERED only. WARN stays local on purpose:
+    # it means "this check could not determine something", which is not worth
+    # waking anyone for, and zalo-health.sh draws the same line (its WARNs go
+    # to `logger`, never through notify()).
+    if ($Level -eq 'ALERT' -or $Level -eq 'RECOVERED') {
+        $text = if ($Level -eq 'ALERT') {
+            @"
+🔴 Zalo bot DOWN — $Message
+
+Host: $env:COMPUTERNAME
+Kiểm tra:      Get-ScheduledTask HermesZaloGateway
+Khởi động lại: Restart-ScheduledTask -TaskName HermesZaloGateway
+Log:           $LogFile
+"@
+        } else {
+            "🟢 Zalo bot đã hoạt động trở lại. (host: $env:COMPUTERNAME)"
+        }
+        $outcome = Send-Telegram $text
+        Add-Content -Path $LogFile -Value "$stamp [$Level] telegram: $outcome" `
+                    -Encoding utf8
+    }
 }
 
 function Fail([string]$Reason) {
