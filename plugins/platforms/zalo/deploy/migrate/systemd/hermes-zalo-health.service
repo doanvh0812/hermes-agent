@@ -1,5 +1,5 @@
 [Unit]
-Description=Zalo bot health check (bridge, login, token, Odoo key)
+Description=Zalo bot health check (bridge, login, token, Odoo key, MCP tools)
 After=network-online.target
 
 [Service]

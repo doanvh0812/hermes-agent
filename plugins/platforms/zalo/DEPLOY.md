@@ -685,7 +685,8 @@ neither substitutes for backend authorization.
 | `deploy/skills/odoo/` | `$HERMES_HOME/skills/odoo/` | `odoo-chat-support` skill — full operating rules |
 | `deploy/odoo-mcp/field_policy.json` | `$HERMES_HOME/odoo-mcp/` | Field-level ACL — enforced by the read tools, **not** by `execute_method` |
 | `deploy/odoo-mcp/instructions.txt` | `$HERMES_HOME/odoo-mcp/` | Server-level MCP instructions |
-| `deploy/zalo-health.sh` | anywhere on PATH | Bridge health + token-drift check |
+| `deploy/zalo-health.sh` | anywhere on PATH | Bridge health, token drift, Odoo key, and whether the gateway actually registered its MCP tools |
+| `deploy/check-mcp-tools.py` | beside `zalo-health.sh` | Reads the gateway's own log to prove it holds its MCP tools — a live credential does not |
 | `deploy/logrotate.conf` | user cron | Log rotation |
 | `deploy/patches/fix-execute-method-field-acl.py` | run after enabling `execute_method` | Makes `execute_method` obey the allowlist so it cannot bypass the field ACL |
 

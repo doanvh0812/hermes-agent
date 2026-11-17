@@ -177,4 +177,43 @@ Tạo key mới: My Profile → Account Security → New API Key"
     fi
 fi
 
+# ---- 6. gateway có thật sự nắm được tool MCP ------------------------------
+# Mục 5 chứng minh CREDENTIAL Odoo còn dùng được. Nó không chứng minh gateway
+# DÙNG được: tool MCP nằm trong tiến trình của chính gateway, discovery chỉ
+# chạy MỘT lần lúc khởi động, và một lần connect thất bại thì không bao giờ
+# được thử lại -- chỉ /reload-mcp hoặc restart mới lặp lại nó.
+#
+# Đo ngày 2026-11-17: bốn ngày không có một tool Odoo nào, trong khi unit báo
+# active, bridge báo ready, mục 5 pass, và file state ghi "ok" mỗi 10 phút.
+# check-mcp-tools.py ghi đầy đủ cơ chế.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MCP_CHECK="$HERE/check-mcp-tools.py"
+# HERMES_HOME là profile home, nên log của gateway nằm ngay cạnh.
+AGENT_LOG="$HERMES_HOME/logs/agent.log"
+# venv của agent khi script nằm đúng chỗ trong cây agent; nếu không thì bất kỳ
+# python3 nào cũng được -- checker chỉ dùng stdlib.
+MCP_PY=""
+for cand in "${ZALO_HEALTH_PYTHON:-}" \
+            "$HERE/../../../../venv/bin/python" \
+            "$(command -v python3 2>/dev/null)" \
+            "$(command -v python 2>/dev/null)"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then MCP_PY="$cand"; break; fi
+done
+if [ -f "$MCP_CHECK" ] && [ -n "$MCP_PY" ] && [ -f "$AGENT_LOG" ]; then
+    MCP_OUT="$("$MCP_PY" "$MCP_CHECK" --log "$AGENT_LOG" 2>/dev/null)"
+    case "$?" in
+        0) ;;
+        1) fail "gateway thiếu tool MCP" "$MCP_OUT
+
+Bot vẫn trả lời nhưng không tra được dữ liệu. Khởi động lại gateway:
+systemctl ${SYSTEMCTL_SCOPE} restart ${GATEWAY_UNIT:-hermes-gateway-zalo}" ;;
+        # Không xác định được (log đã rotate, không đọc được) thì chỉ WARN: một
+        # monitor báo động vì chính helper của nó không đọc được file sẽ dạy
+        # người ta bỏ qua nó.
+        *) logger -t zalo-bridge "WARN: không xác định được trạng thái MCP: $MCP_OUT" ;;
+    esac
+else
+    logger -t zalo-bridge "WARN: bỏ qua kiểm tra MCP (thiếu checker, python hoặc agent.log)"
+fi
+
 recovered

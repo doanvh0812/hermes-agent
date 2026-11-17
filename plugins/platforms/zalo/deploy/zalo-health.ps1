@@ -144,6 +144,54 @@ if ($Token) {
     Write-Alert 'WARN' 'ZALO_BRIDGE_TOKEN unset; token drift will go undetected'
 }
 
+# --- 2b. the gateway actually holds its MCP tools -----------------------------
+# The checks above prove the task and the bridge are alive. They say nothing
+# about whether the gateway registered its MCP tools: those live in the
+# gateway's OWN process, discovery runs once at startup, and a connect that
+# fails there is never retried -- only /reload-mcp or a restart repeats it.
+#
+# Measured 2026-11-17: four days with zero Odoo tools while the task said
+# Running, the bridge said ready, and this script wrote 'ok' every ten
+# minutes. check-mcp-tools.py carries the full account.
+$mcpCheck = Join-Path $PSScriptRoot 'check-mcp-tools.py'
+if (-not (Test-Path $mcpCheck)) {
+    # Deployed layout: this script runs from the profile's ops\ directory
+    # while the checker ships inside the plugin.
+    $mcpCheck = Join-Path (Split-Path (Split-Path $ProfileHome -Parent) -Parent) `
+                          'hermes-agent\plugins\platforms\zalo\deploy\check-mcp-tools.py'
+}
+$agentLog = Join-Path $ProfileHome 'logs\agent.log'
+$mcpPy = $env:ZALO_HEALTH_PYTHON
+if (-not $mcpPy) {
+    $venvPy = Join-Path (Split-Path (Split-Path $ProfileHome -Parent) -Parent) `
+                        'hermes-agent\venv\Scripts\python.exe'
+    if (Test-Path $venvPy) { $mcpPy = $venvPy }
+    else { $mcpPy = (Get-Command python -ErrorAction SilentlyContinue).Source }
+}
+if ((Test-Path $mcpCheck) -and $mcpPy -and (Test-Path $agentLog)) {
+    # Do NOT add 2>&1 to the call below. PowerShell 5.1 wraps every stderr line
+    # from a native exe in a NativeCommandError ErrorRecord, and
+    # $ErrorActionPreference is 'Stop' at the top of this file -- one stray
+    # stderr line would kill the health check instead of reporting through it.
+    # Same trap documented at length in run-gateway.ps1.
+    try {
+        $mcpOut  = (& $mcpPy $mcpCheck --log $agentLog) -join ' '
+        $mcpCode = $LASTEXITCODE
+    } catch {
+        $mcpOut  = $_.Exception.Message
+        $mcpCode = 2
+    }
+    if ($mcpCode -eq 1) {
+        Fail "gateway is missing its MCP tools - $mcpOut"
+    } elseif ($mcpCode -ne 0) {
+        # Indeterminate is a WARN on purpose: a monitor that pages because its
+        # own helper could not read a file trains people to ignore it.
+        Write-Alert 'WARN' "MCP tool state unknown: $mcpOut"
+    }
+} else {
+    Write-Alert 'WARN' 'skipping the MCP tool check (no checker, python, or agent.log)'
+}
+
 # --- 3. recovered? ------------------------------------------------------------
 if (Test-Path $StateFile) {
     $prev = (Get-Content $StateFile -Raw).Trim()
